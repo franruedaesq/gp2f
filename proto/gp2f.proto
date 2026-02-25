@@ -1,0 +1,95 @@
+syntax = "proto3";
+package gp2f;
+
+// ──────────────────────────────────────────────
+// Minimal AST Grammar
+// ──────────────────────────────────────────────
+
+// ASTNode – every rule tree is composed of these nodes.
+// Leaf nodes carry a value; composite nodes carry children.
+message ASTNode {
+  string version = 1;       // semver, e.g. "1.0.0"
+  NodeKind kind = 2;
+  repeated ASTNode children = 3;
+  string path = 4;          // JSON-pointer for field access nodes
+  string value = 5;         // string-encoded scalar value for leaf nodes
+  string call_name = 6;     // used only by NodeKind.CALL
+}
+
+enum NodeKind {
+  LITERAL_TRUE  = 0;
+  LITERAL_FALSE = 1;
+  AND           = 2;
+  OR            = 3;
+  NOT           = 4;
+  EQ            = 5;
+  NEQ           = 6;
+  GT            = 7;
+  GTE           = 8;
+  LT            = 9;
+  LTE           = 10;
+  IN            = 11;   // left operand is contained in right (array)
+  CONTAINS      = 12;   // right operand is contained in left (array/string)
+  EXISTS        = 13;   // path exists in state
+  FIELD         = 14;   // resolve path from state
+  CALL          = 15;   // future-proof stub
+}
+
+// ──────────────────────────────────────────────
+// Op Identity & Wire Protocol
+// ──────────────────────────────────────────────
+
+// Cryptographic operation identifier.
+// Encoded as: base64url(version|tenant|client|counter|ts|nonce|HMAC-SHA256)
+message OpId {
+  string version    = 1;
+  string tenant_id  = 2;
+  string client_id  = 3;
+  uint64 counter    = 4;
+  int64  timestamp  = 5;   // Unix ms
+  bytes  nonce      = 6;   // 16 random bytes
+  bytes  hmac       = 7;   // HMAC-SHA256 over preceding fields
+}
+
+// Message the client sends to the server for each action.
+message ClientMessage {
+  OpId   op_id               = 1;
+  string ast_version         = 2;
+  string action              = 3;
+  bytes  payload             = 4;   // JSON-encoded action payload
+  string client_snapshot_hash = 5;  // blake3 hex of client state before action
+}
+
+// Server response: operation accepted.
+message AcceptResponse {
+  string op_id_encoded = 1;
+  string server_snapshot_hash = 2;
+}
+
+// Server response: operation rejected – includes a 3-way patch.
+message RejectResponse {
+  string op_id_encoded = 1;
+  string reason        = 2;
+  ThreeWayPatch patch  = 3;
+}
+
+// 3-way patch used for conflict resolution.
+message ThreeWayPatch {
+  bytes base_snapshot    = 1;  // JSON state before client action
+  bytes local_diff       = 2;  // client's diff (base → local)
+  bytes server_diff      = 3;  // server's diff (base → authoritative)
+  repeated FieldConflict conflicts = 4;
+}
+
+// Per-field conflict with the chosen resolution strategy.
+message FieldConflict {
+  string              path     = 1;
+  FieldConflictStrategy strategy = 2;
+  bytes               resolved_value = 3;
+}
+
+enum FieldConflictStrategy {
+  CRDT         = 0;   // Yjs / Yrs CRDT merge
+  LWW          = 1;   // Last-Write-Wins
+  TRANSACTIONAL = 2;  // Reject entire op if field conflicts
+}
