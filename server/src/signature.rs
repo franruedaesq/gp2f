@@ -37,10 +37,7 @@ pub fn verify_signature(msg: &ClientMessage, tenant_secret: &[u8]) -> Result<(),
     if sig_b64 == expected_b64 {
         Ok(())
     } else {
-        Err(format!(
-            "invalid client signature for op_id={}",
-            msg.op_id
-        ))
+        Err(format!("invalid client signature for op_id={}", msg.op_id))
     }
 }
 

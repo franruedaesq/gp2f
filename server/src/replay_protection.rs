@@ -59,8 +59,7 @@ impl ClientEntry {
             return true;
         }
         // Bloom check for older items that fell off the exact window.
-        bloom_contains(&self.bloom_active, op_id)
-            || bloom_contains(&self.bloom_previous, op_id)
+        bloom_contains(&self.bloom_active, op_id) || bloom_contains(&self.bloom_previous, op_id)
     }
 
     /// Record `op_id` as seen.
@@ -80,7 +79,7 @@ impl ClientEntry {
         // Rotate bloom filters when active is full.
         if self.bloom_active_count >= ROTATE_AT {
             std::mem::swap(&mut self.bloom_previous, &mut self.bloom_active);
-            self.bloom_active = Box::new([0u64; BLOOM_BITS / 64]);
+            *self.bloom_active = [0u64; BLOOM_BITS / 64];
             self.bloom_active_count = 0;
         }
     }
@@ -105,9 +104,8 @@ fn bloom_positions(item: &[u8]) -> [usize; BLOOM_HASHES] {
     h2 ^= h2 >> 31;
 
     let mut positions = [0usize; BLOOM_HASHES];
-    for i in 0..BLOOM_HASHES {
-        positions[i] =
-            ((h1.wrapping_add((i as u64).wrapping_mul(h2))) as usize) % BLOOM_BITS;
+    for (i, pos) in positions.iter_mut().enumerate() {
+        *pos = ((h1.wrapping_add((i as u64).wrapping_mul(h2))) as usize) % BLOOM_BITS;
     }
     positions
 }
@@ -208,4 +206,3 @@ mod tests {
         }
     }
 }
-

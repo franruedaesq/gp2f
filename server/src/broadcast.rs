@@ -33,10 +33,7 @@ impl Broadcaster {
     /// Returns the number of subscribers that received the message.
     /// A return value of `0` means no WebSocket connections are currently open.
     pub fn publish(&self, msg: ServerMessage) -> usize {
-        match self.tx.send(msg) {
-            Ok(n) => n,
-            Err(_) => 0, // No active receivers
-        }
+        self.tx.send(msg).unwrap_or_default()
     }
 
     /// Subscribe to the broadcast channel.
@@ -82,8 +79,14 @@ mod tests {
         let mut rx1 = broadcaster.subscribe();
         let mut rx2 = broadcaster.subscribe();
         broadcaster.publish(accept("op-2"));
-        assert!(matches!(rx1.recv().await.unwrap(), ServerMessage::Accept(_)));
-        assert!(matches!(rx2.recv().await.unwrap(), ServerMessage::Accept(_)));
+        assert!(matches!(
+            rx1.recv().await.unwrap(),
+            ServerMessage::Accept(_)
+        ));
+        assert!(matches!(
+            rx2.recv().await.unwrap(),
+            ServerMessage::Accept(_)
+        ));
     }
 
     #[test]

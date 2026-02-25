@@ -2,7 +2,9 @@ use crate::broadcast::Broadcaster;
 use crate::event_store::{EventStore, OpOutcome};
 use crate::replay_protection::ReplayGuard;
 use crate::signature::verify_signature;
-use crate::wire::{AcceptResponse, ClientMessage, FieldConflict, RejectResponse, ServerMessage, ThreeWayPatch};
+use crate::wire::{
+    AcceptResponse, ClientMessage, FieldConflict, RejectResponse, ServerMessage, ThreeWayPatch,
+};
 use policy_core::crdt::{DocumentSchema, FieldStrategy};
 use policy_core::evaluator::hash_state;
 use serde_json::{json, Map, Value};
@@ -96,7 +98,9 @@ impl Reconciler {
         }
 
         // 4. Check for transactional field conflicts
-        if let Err(reason) = check_transactional_conflicts(&current_state, &msg.payload, &self.schema) {
+        if let Err(reason) =
+            check_transactional_conflicts(&current_state, &msg.payload, &self.schema)
+        {
             let resp = ServerMessage::Reject(RejectResponse {
                 op_id: msg.op_id.clone(),
                 reason,
@@ -152,9 +156,7 @@ fn build_three_way_patch(
 ) -> ThreeWayPatch {
     let mut conflicts = Vec::new();
 
-    if let (Value::Object(server_obj), Value::Object(client_obj)) =
-        (server_state, client_payload)
-    {
+    if let (Value::Object(server_obj), Value::Object(client_obj)) = (server_state, client_payload) {
         for (key, client_val) in client_obj {
             let path = format!("/{key}");
             let strategy = schema.strategy_for(&path);
@@ -356,4 +358,3 @@ mod tests {
         }
     }
 }
-

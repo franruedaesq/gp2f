@@ -4,4 +4,5 @@ pub mod handlers;
 pub mod reconciler;
 pub mod replay_protection;
 pub mod signature;
+pub mod token_service;
 pub mod wire;
