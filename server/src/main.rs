@@ -1,6 +1,7 @@
 use axum::{
     extract::ws::{Message, WebSocket, WebSocketUpgrade},
     extract::State,
+    http::StatusCode,
     response::IntoResponse,
     routing::{get, post},
     Json, Router,
@@ -11,12 +12,14 @@ use tracing_subscriber::{layer::SubscriberExt, util::SubscriberInitExt};
 
 use gp2f_server::{
     reconciler::Reconciler,
+    token_service::{MintRequest, RedeemRequest, TokenService},
     wire::{ClientMessage, ServerMessage},
 };
 
 #[derive(Clone)]
 struct AppState {
     reconciler: Arc<Reconciler>,
+    token_service: Arc<TokenService>,
 }
 
 #[tokio::main]
@@ -30,12 +33,15 @@ async fn main() {
 
     let state = AppState {
         reconciler: Arc::new(Reconciler::new()),
+        token_service: Arc::new(TokenService::new()),
     };
 
     let app = Router::new()
         .route("/health", get(health_handler))
         .route("/ws", get(ws_handler))
         .route("/op", post(op_handler))
+        .route("/token/mint", post(token_mint_handler))
+        .route("/token/redeem", post(token_redeem_handler))
         .with_state(state)
         .layer(TraceLayer::new_for_http());
 
@@ -94,4 +100,28 @@ async fn op_handler(
     Json(client_msg): Json<ClientMessage>,
 ) -> Json<ServerMessage> {
     Json(state.reconciler.reconcile(&client_msg))
+}
+
+async fn token_mint_handler(
+    State(state): State<AppState>,
+    Json(req): Json<MintRequest>,
+) -> impl IntoResponse {
+    let resp = state.token_service.mint(req);
+    (StatusCode::OK, Json(resp))
+}
+
+async fn token_redeem_handler(
+    State(state): State<AppState>,
+    Json(req): Json<RedeemRequest>,
+) -> impl IntoResponse {
+    match state.token_service.redeem(req) {
+        Ok(resp) => (
+            StatusCode::OK,
+            Json(serde_json::to_value(resp).unwrap_or_else(|_| serde_json::json!({}))),
+        ),
+        Err(e) => (
+            StatusCode::UNPROCESSABLE_ENTITY,
+            Json(serde_json::json!({ "error": e.to_string() })),
+        ),
+    }
 }

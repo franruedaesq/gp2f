@@ -4,8 +4,8 @@
 //! Non-CRDT fields use LWW (last-write-wins) or TRANSACTIONAL semantics.
 
 use serde::{Deserialize, Serialize};
-use yrs::{Doc, GetString, ReadTxn, Text, Transact, TextRef, Update};
 use yrs::updates::decoder::Decode;
+use yrs::{Doc, GetString, ReadTxn, Text, TextRef, Transact, Update};
 
 /// Per-field conflict resolution strategy registered in the schema.
 ///
@@ -40,8 +40,7 @@ impl CrdtDoc {
     }
 
     fn text(&self) -> TextRef {
-        self.inner
-            .get_or_insert_text(self.field_name.as_str())
+        self.inner.get_or_insert_text(self.field_name.as_str())
     }
 
     /// Insert `text` at `index` in the CRDT text field.
@@ -75,8 +74,7 @@ impl CrdtDoc {
     ///
     /// Returns `Ok(())` on success or an error string on decode failure.
     pub fn apply_update(&self, update: &[u8]) -> Result<(), String> {
-        let update =
-            Update::decode_v1(update).map_err(|e| format!("decode error: {e}"))?;
+        let update = Update::decode_v1(update).map_err(|e| format!("decode error: {e}"))?;
         let mut txn = self.inner.transact_mut();
         txn.apply_update(update)
             .map_err(|e| format!("apply error: {e}"))?;

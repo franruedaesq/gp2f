@@ -145,10 +145,7 @@ mod tests {
     fn sequence_numbers_are_monotonic() {
         let store = EventStore::new();
         for i in 0..5u64 {
-            let seq = store.append(
-                msg("t", "w", "i", &format!("op-{i}")),
-                OpOutcome::Accepted,
-            );
+            let seq = store.append(msg("t", "w", "i", &format!("op-{i}")), OpOutcome::Accepted);
             assert_eq!(seq, i);
         }
     }
