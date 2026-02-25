@@ -10,6 +10,19 @@ pub struct ClientMessage {
     #[serde(default)]
     pub payload: serde_json::Value,
     pub client_snapshot_hash: String,
+    /// Tenant identifier (part of the `tenant:workflowId:instanceId` event-store key).
+    #[serde(default)]
+    pub tenant_id: String,
+    /// Workflow definition identifier.
+    #[serde(default)]
+    pub workflow_id: String,
+    /// Specific workflow instance identifier.
+    #[serde(default)]
+    pub instance_id: String,
+    /// HMAC-SHA256 over the canonical op fields, base64url-encoded.
+    /// When present the server validates it; absent ⇒ unauthenticated (dev only).
+    #[serde(default)]
+    pub client_signature: Option<String>,
 }
 
 /// ACCEPT response – the operation was applied successfully.
@@ -63,4 +76,16 @@ pub enum FieldConflictStrategy {
 pub enum ServerMessage {
     Accept(AcceptResponse),
     Reject(RejectResponse),
+}
+
+// ── conversions ───────────────────────────────────────────────────────────────
+
+impl From<policy_core::FieldStrategy> for FieldConflictStrategy {
+    fn from(s: policy_core::FieldStrategy) -> Self {
+        match s {
+            policy_core::FieldStrategy::YjsText => FieldConflictStrategy::Crdt,
+            policy_core::FieldStrategy::Lww => FieldConflictStrategy::Lww,
+            policy_core::FieldStrategy::Transactional => FieldConflictStrategy::Transactional,
+        }
+    }
 }

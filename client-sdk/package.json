@@ -1,0 +1,23 @@
+{
+  "name": "@gp2f/client-sdk",
+  "version": "0.1.0",
+  "description": "GP2F client SDK – reconciliation UX components and WebSocket client",
+  "main": "dist/index.js",
+  "types": "dist/index.d.ts",
+  "files": ["dist", "src"],
+  "scripts": {
+    "build": "tsc",
+    "test": "jest --passWithNoTests"
+  },
+  "keywords": ["gp2f", "crdt", "reconciliation", "optimistic-ui"],
+  "license": "MIT",
+  "peerDependencies": {
+    "react": ">=18.0.0",
+    "react-dom": ">=18.0.0"
+  },
+  "devDependencies": {
+    "@types/react": "^18.0.0",
+    "@types/react-dom": "^18.0.0",
+    "typescript": "^5.0.0"
+  }
+}
