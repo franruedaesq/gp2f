@@ -214,6 +214,34 @@ impl Evaluator {
                 let name = node.call_name.as_deref().unwrap_or("<unnamed>").to_string();
                 return Err(EvalError::UnresolvedCall(name));
             }
+
+            NodeKind::VibeCheck => {
+                // Check /vibe/intent == node.value (optional) AND
+                // /vibe/confidence >= node.path threshold (optional).
+                let mut result = true;
+
+                if let Some(expected_intent) = &node.value {
+                    let actual = resolve_path(state, "/vibe/intent")
+                        .and_then(|v| v.as_str())
+                        .unwrap_or("");
+                    result &= actual == expected_intent;
+                }
+
+                if let Some(threshold_str) = &node.path {
+                    let threshold: f64 = threshold_str.parse().unwrap_or(1.0);
+                    let confidence = resolve_path(state, "/vibe/confidence")
+                        .and_then(|v| v.as_f64())
+                        .unwrap_or(0.0);
+                    result &= confidence >= threshold;
+                }
+
+                let intent_label = node.value.as_deref().unwrap_or("*");
+                let threshold_label = node.path.as_deref().unwrap_or("*");
+                trace.push(format!(
+                    "VIBE_CHECK(intent={intent_label}, confidence>={threshold_label}) => {result}"
+                ));
+                result
+            }
         };
 
         Ok(result)
@@ -819,5 +847,98 @@ mod tests {
             eval(state.clone(), node).result,
             eval(state, deserialized).result
         );
+    }
+
+    // ── vibe_check ────────────────────────────────────────────────────────
+
+    #[test]
+    fn vibe_check_matches_intent_and_confidence() {
+        let state = json!({
+            "vibe": { "intent": "frustrated", "confidence": 0.92, "bottleneck": "file_upload" }
+        });
+        let node = AstNode {
+            version: None,
+            kind: NodeKind::VibeCheck,
+            children: vec![],
+            path: Some("0.8".into()),
+            value: Some("frustrated".into()),
+            call_name: None,
+        };
+        assert!(eval(state, node).result);
+    }
+
+    #[test]
+    fn vibe_check_fails_wrong_intent() {
+        let state = json!({
+            "vibe": { "intent": "focused", "confidence": 0.99, "bottleneck": "other" }
+        });
+        let node = AstNode {
+            version: None,
+            kind: NodeKind::VibeCheck,
+            children: vec![],
+            path: Some("0.5".into()),
+            value: Some("frustrated".into()),
+            call_name: None,
+        };
+        assert!(!eval(state, node).result);
+    }
+
+    #[test]
+    fn vibe_check_fails_low_confidence() {
+        let state = json!({
+            "vibe": { "intent": "frustrated", "confidence": 0.3, "bottleneck": "file_upload" }
+        });
+        let node = AstNode {
+            version: None,
+            kind: NodeKind::VibeCheck,
+            children: vec![],
+            path: Some("0.8".into()), // threshold: 0.8
+            value: Some("frustrated".into()),
+            call_name: None,
+        };
+        assert!(!eval(state, node).result);
+    }
+
+    #[test]
+    fn vibe_check_no_vibe_in_state_is_false() {
+        let state = json!({});
+        let node = AstNode {
+            version: None,
+            kind: NodeKind::VibeCheck,
+            children: vec![],
+            path: Some("0.5".into()),
+            value: Some("frustrated".into()),
+            call_name: None,
+        };
+        assert!(!eval(state, node).result);
+    }
+
+    #[test]
+    fn vibe_check_no_constraints_is_true() {
+        // Both path and value omitted → always true
+        let state = json!({});
+        let node = AstNode {
+            version: None,
+            kind: NodeKind::VibeCheck,
+            children: vec![],
+            path: None,
+            value: None,
+            call_name: None,
+        };
+        assert!(eval(state, node).result);
+    }
+
+    #[test]
+    fn vibe_check_confidence_only() {
+        let state = json!({ "vibe": { "intent": "anything", "confidence": 0.9 } });
+        let node = AstNode {
+            version: None,
+            kind: NodeKind::VibeCheck,
+            children: vec![],
+            path: Some("0.5".into()),
+            value: None,
+            call_name: None,
+        };
+        assert!(eval(state, node).result);
     }
 }

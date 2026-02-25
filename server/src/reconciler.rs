@@ -1,5 +1,7 @@
 use crate::broadcast::Broadcaster;
 use crate::event_store::{EventStore, OpOutcome};
+use crate::limits::LimitsGuard;
+use crate::rbac::RbacRegistry;
 use crate::replay_protection::ReplayGuard;
 use crate::signature::verify_signature;
 use crate::wire::{
@@ -8,7 +10,7 @@ use crate::wire::{
 use policy_core::crdt::{DocumentSchema, FieldStrategy};
 use policy_core::evaluator::hash_state;
 use serde_json::{json, Map, Value};
-use std::sync::Mutex;
+use std::sync::{Arc, Mutex};
 
 /// Server-side reconciler.
 ///
@@ -28,6 +30,10 @@ pub struct Reconciler {
     broadcaster: Broadcaster,
     /// HMAC secret used to validate `client_signature` (empty = dev mode).
     tenant_secret: Vec<u8>,
+    /// Per-tenant operational limits and backpressure enforcement.
+    pub limits: Arc<LimitsGuard>,
+    /// RBAC registry for role-based access control.
+    pub rbac: Arc<RbacRegistry>,
 }
 
 impl Reconciler {
@@ -44,6 +50,8 @@ impl Reconciler {
             schema: DocumentSchema::default(),
             broadcaster: Broadcaster::new(),
             tenant_secret: secret.to_vec(),
+            limits: Arc::new(LimitsGuard::new()),
+            rbac: Arc::new(RbacRegistry::with_defaults()),
         }
     }
 
@@ -63,7 +71,18 @@ impl Reconciler {
             });
         }
 
-        // 2. Replay protection (per-client, keyed by tenant+client in op_id)
+        // 2. Backpressure / per-tenant queue limit
+        if let Err(signal) = self.limits.try_enqueue_op(&msg.tenant_id) {
+            let resp = ServerMessage::Reject(RejectResponse {
+                op_id: msg.op_id.clone(),
+                reason: signal.to_string(),
+                patch: empty_patch(),
+            });
+            self.broadcaster.publish(resp.clone());
+            return resp;
+        }
+
+        // 3. Replay protection (per-client, keyed by tenant+client in op_id)
         {
             let mut guard = self.replay.lock().unwrap();
             if guard.check_and_insert(&msg.tenant_id, &msg.op_id) {
@@ -74,6 +93,7 @@ impl Reconciler {
                 });
                 self.event_store.append(msg.clone(), OpOutcome::Rejected);
                 self.broadcaster.publish(resp.clone());
+                self.limits.dequeue_op(&msg.tenant_id);
                 return resp;
             }
         }
@@ -81,7 +101,7 @@ impl Reconciler {
         let current_state = self.state.lock().unwrap().clone();
         let server_hash = hash_state(&current_state);
 
-        // 3. Snapshot hash agreement
+        // 4. Snapshot hash agreement
         if msg.client_snapshot_hash != server_hash {
             let patch = build_three_way_patch(&current_state, &msg.payload, &self.schema);
             let resp = ServerMessage::Reject(RejectResponse {
@@ -94,10 +114,11 @@ impl Reconciler {
             });
             self.event_store.append(msg.clone(), OpOutcome::Rejected);
             self.broadcaster.publish(resp.clone());
+            self.limits.dequeue_op(&msg.tenant_id);
             return resp;
         }
 
-        // 4. Check for transactional field conflicts
+        // 5. Check for transactional field conflicts
         if let Err(reason) =
             check_transactional_conflicts(&current_state, &msg.payload, &self.schema)
         {
@@ -108,16 +129,18 @@ impl Reconciler {
             });
             self.event_store.append(msg.clone(), OpOutcome::Rejected);
             self.broadcaster.publish(resp.clone());
+            self.limits.dequeue_op(&msg.tenant_id);
             return resp;
         }
 
-        // 5. Apply the op: merge payload into authoritative state
+        // 6. Apply the op: merge payload into authoritative state
         let new_state = apply_op(&current_state, &msg.payload, &self.schema);
         let new_hash = hash_state(&new_state);
 
-        // 6. Persist
+        // 7. Persist
         *self.state.lock().unwrap() = new_state;
         self.event_store.append(msg.clone(), OpOutcome::Accepted);
+        self.limits.dequeue_op(&msg.tenant_id);
 
         let resp = ServerMessage::Accept(AcceptResponse {
             op_id: msg.op_id.clone(),
@@ -284,6 +307,8 @@ mod tests {
             workflow_id: "wf1".into(),
             instance_id: "inst1".into(),
             client_signature: None,
+            role: "default".into(),
+            vibe: None,
         }
     }
 
