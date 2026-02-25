@@ -1,0 +1,66 @@
+use serde::{Deserialize, Serialize};
+
+/// Message the client sends to the server.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ClientMessage {
+    pub op_id: String,
+    pub ast_version: String,
+    pub action: String,
+    #[serde(default)]
+    pub payload: serde_json::Value,
+    pub client_snapshot_hash: String,
+}
+
+/// ACCEPT response – the operation was applied successfully.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct AcceptResponse {
+    pub op_id: String,
+    pub server_snapshot_hash: String,
+}
+
+/// REJECT response – the operation was rejected, includes a patch.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct RejectResponse {
+    pub op_id: String,
+    pub reason: String,
+    pub patch: ThreeWayPatch,
+}
+
+/// 3-way patch used for conflict resolution.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ThreeWayPatch {
+    pub base_snapshot: serde_json::Value,
+    pub local_diff: serde_json::Value,
+    pub server_diff: serde_json::Value,
+    pub conflicts: Vec<FieldConflict>,
+}
+
+/// A single field conflict with its chosen resolution strategy.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct FieldConflict {
+    pub path: String,
+    pub strategy: FieldConflictStrategy,
+    pub resolved_value: serde_json::Value,
+}
+
+/// Per-field conflict resolution strategy.
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "SCREAMING_SNAKE_CASE")]
+pub enum FieldConflictStrategy {
+    Crdt,
+    Lww,
+    Transactional,
+}
+
+/// Top-level server message (either accept or reject).
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(tag = "type", rename_all = "SCREAMING_SNAKE_CASE")]
+pub enum ServerMessage {
+    Accept(AcceptResponse),
+    Reject(RejectResponse),
+}

@@ -1,0 +1,19 @@
+[package]
+name = "gp2f-cli"
+version.workspace = true
+edition.workspace = true
+authors.workspace = true
+license.workspace = true
+description = "GP2F command-line interface"
+default-run = "gp2f"
+
+[[bin]]
+name = "gp2f"
+path = "src/main.rs"
+
+[dependencies]
+policy-core = { path = "../policy-core" }
+serde.workspace = true
+serde_json.workspace = true
+thiserror.workspace = true
+clap = { version = "4", features = ["derive"] }

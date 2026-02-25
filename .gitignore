@@ -1,0 +1,9 @@
+/target
+/dist
+node_modules
+*.wasm
+pkg/
+.DS_Store
+*.pb.go
+__pycache__
+.env

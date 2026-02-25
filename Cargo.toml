@@ -1,0 +1,21 @@
+[workspace]
+members = [
+    "policy-core",
+    "cli",
+    "server",
+]
+resolver = "2"
+
+[workspace.package]
+version = "0.1.0"
+edition = "2021"
+authors = ["GP2F Contributors"]
+license = "MIT"
+
+[workspace.dependencies]
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+blake3 = "1"
+thiserror = "2"
+chrono = { version = "0.4", features = ["serde"] }
+proptest = "1"
