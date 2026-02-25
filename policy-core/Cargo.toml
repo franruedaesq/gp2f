@@ -12,6 +12,7 @@ serde_json.workspace = true
 blake3.workspace = true
 thiserror.workspace = true
 chrono.workspace = true
+yrs = "0.25"
 
 [dev-dependencies]
 proptest.workspace = true

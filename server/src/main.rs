@@ -57,12 +57,33 @@ async fn ws_handler(ws: WebSocketUpgrade, State(state): State<AppState>) -> impl
 }
 
 async fn handle_socket(mut socket: WebSocket, state: AppState) {
-    while let Some(msg) = socket.recv().await {
-        if let Ok(Message::Text(text)) = msg {
-            if let Ok(client_msg) = serde_json::from_str::<ClientMessage>(&text) {
-                let response = state.reconciler.reconcile(&client_msg);
-                let reply = serde_json::to_string(&response).unwrap_or_default();
-                let _ = socket.send(Message::Text(reply)).await;
+    // Subscribe to broadcast channel so we can push server-initiated messages.
+    let mut broadcast_rx = state.reconciler.broadcaster().subscribe();
+
+    loop {
+        tokio::select! {
+            // Incoming message from the WebSocket client
+            msg = socket.recv() => {
+                match msg {
+                    Some(Ok(Message::Text(text))) => {
+                        if let Ok(client_msg) = serde_json::from_str::<ClientMessage>(&text) {
+                            let response = state.reconciler.reconcile(&client_msg);
+                            let reply = serde_json::to_string(&response).unwrap_or_default();
+                            if socket.send(Message::Text(reply)).await.is_err() {
+                                break;
+                            }
+                        }
+                    }
+                    Some(Ok(Message::Close(_))) | None => break,
+                    _ => {}
+                }
+            }
+            // Broadcast message from another handler (e.g. another client's ACCEPT)
+            Ok(broadcast_msg) = broadcast_rx.recv() => {
+                let text = serde_json::to_string(&broadcast_msg).unwrap_or_default();
+                if socket.send(Message::Text(text)).await.is_err() {
+                    break;
+                }
             }
         }
     }
