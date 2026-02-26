@@ -5,7 +5,7 @@
 
 use serde::{Deserialize, Serialize};
 use yrs::updates::decoder::Decode;
-use yrs::{Doc, GetString, ReadTxn, Text, TextRef, Transact, Update};
+use yrs::{Doc, GetString, Options, ReadTxn, Text, TextRef, Transact, Update};
 
 /// Per-field conflict resolution strategy registered in the schema.
 ///
@@ -25,16 +25,37 @@ pub enum FieldStrategy {
 /// A lightweight CRDT document wrapper around [`yrs::Doc`].
 ///
 /// One `CrdtDoc` is maintained per CRDT field per (tenant, workflow, instance).
+///
+/// ## Garbage Collection
+///
+/// `CrdtDoc` enables yrs tombstone garbage collection by default
+/// (`skip_gc = false`).  Deleted items are purged from the block store on each
+/// transaction commit, preventing unbounded memory growth in long-lived
+/// documents.  Use [`CrdtDoc::new_with_skip_gc`] to disable GC (e.g. when
+/// full undo/redo history must be preserved).
 pub struct CrdtDoc {
     inner: Doc,
     field_name: String,
 }
 
 impl CrdtDoc {
-    /// Create a new empty CRDT document for `field_name`.
+    /// Create a new CRDT document for `field_name` with GC **enabled**.
     pub fn new(field_name: impl Into<String>) -> Self {
+        Self::new_with_skip_gc(field_name, false)
+    }
+
+    /// Create a new CRDT document with explicit GC control.
+    ///
+    /// * `skip_gc = false` (default) – tombstones are collected after each
+    ///   transaction, keeping memory usage bounded.
+    /// * `skip_gc = true` – tombstones are retained; required for undo/redo.
+    pub fn new_with_skip_gc(field_name: impl Into<String>, skip_gc: bool) -> Self {
+        let opts = Options {
+            skip_gc,
+            ..Options::default()
+        };
         Self {
-            inner: Doc::new(),
+            inner: Doc::with_options(opts),
             field_name: field_name.into(),
         }
     }
@@ -122,6 +143,19 @@ impl DocumentSchema {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn gc_enabled_by_default() {
+        let doc = CrdtDoc::new("notes");
+        // GC is on by default: skip_gc should be false
+        assert!(!doc.inner.skip_gc());
+    }
+
+    #[test]
+    fn gc_can_be_disabled() {
+        let doc = CrdtDoc::new_with_skip_gc("notes", true);
+        assert!(doc.inner.skip_gc());
+    }
 
     #[test]
     fn crdt_insert_and_read() {

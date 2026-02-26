@@ -1,15 +1,17 @@
 use crate::broadcast::Broadcaster;
 use crate::event_store::{EventStore, OpOutcome};
-use crate::limits::LimitsGuard;
+use crate::limits::{BackpressureSignal, LimitsGuard};
 use crate::rbac::RbacRegistry;
 use crate::replay_protection::ReplayGuard;
 use crate::signature::verify_signature;
 use crate::wire::{
     AcceptResponse, ClientMessage, FieldConflict, RejectResponse, ServerMessage, ThreeWayPatch,
 };
-use policy_core::crdt::{DocumentSchema, FieldStrategy};
+use base64::Engine as _;
+use policy_core::crdt::{CrdtDoc, DocumentSchema, FieldStrategy};
 use policy_core::evaluator::hash_state;
 use serde_json::{json, Map, Value};
+use std::collections::HashMap;
 use std::sync::{Arc, Mutex};
 
 /// Server-side reconciler.
@@ -24,6 +26,16 @@ pub struct Reconciler {
     pub event_store: EventStore,
     /// Current authoritative state.
     state: Mutex<Value>,
+    /// Snapshot history: maps `state_hash` → `state_value`.
+    ///
+    /// Allows the 3-way merge to reconstruct the **base** state (last common
+    /// ancestor) that the client was working from when it produced a payload.
+    snapshot_history: Mutex<HashMap<String, Value>>,
+    /// Per-field CRDT documents: maps `"instance_key:field"` → [`CrdtDoc`].
+    ///
+    /// Maintained for every `YjsText` field so the server can auto-merge
+    /// concurrent client updates rather than doing a naïve last-write-wins.
+    crdt_docs: Mutex<HashMap<String, CrdtDoc>>,
     /// Field schema controlling conflict-resolution strategy per path.
     schema: DocumentSchema,
     /// ACCEPT/REJECT broadcaster for WebSocket push.
@@ -43,10 +55,16 @@ impl Reconciler {
 
     /// Create a reconciler with an explicit HMAC secret for signature validation.
     pub fn with_secret(secret: &[u8]) -> Self {
+        let initial_state = json!({});
+        let initial_hash = hash_state(&initial_state);
+        let mut snapshot_history = HashMap::new();
+        snapshot_history.insert(initial_hash, initial_state.clone());
         Self {
             replay: Mutex::new(ReplayGuard::new()),
             event_store: EventStore::new(),
-            state: Mutex::new(json!({})),
+            state: Mutex::new(initial_state),
+            snapshot_history: Mutex::new(snapshot_history),
+            crdt_docs: Mutex::new(HashMap::new()),
             schema: DocumentSchema::default(),
             broadcaster: Broadcaster::new(),
             tenant_secret: secret.to_vec(),
@@ -68,15 +86,21 @@ impl Reconciler {
                 op_id: msg.op_id.clone(),
                 reason,
                 patch: empty_patch(),
+                retry_after_ms: None,
             });
         }
 
         // 2. Backpressure / per-tenant queue limit
         if let Err(signal) = self.limits.try_enqueue_op(&msg.tenant_id) {
+            let retry_after_ms = match &signal {
+                BackpressureSignal::QueueFull { .. } => Some(1_000u32),
+                _ => None,
+            };
             let resp = ServerMessage::Reject(RejectResponse {
                 op_id: msg.op_id.clone(),
                 reason: signal.to_string(),
                 patch: empty_patch(),
+                retry_after_ms,
             });
             self.broadcaster.publish(resp.clone());
             return resp;
@@ -90,6 +114,7 @@ impl Reconciler {
                     op_id: msg.op_id.clone(),
                     reason: "duplicate op_id".into(),
                     patch: empty_patch(),
+                    retry_after_ms: None,
                 });
                 self.event_store.append(msg.clone(), OpOutcome::Rejected);
                 self.broadcaster.publish(resp.clone());
@@ -103,7 +128,16 @@ impl Reconciler {
 
         // 4. Snapshot hash agreement
         if msg.client_snapshot_hash != server_hash {
-            let patch = build_three_way_patch(&current_state, &msg.payload, &self.schema);
+            // Look up the base state the client was working from.
+            let base_state = self
+                .snapshot_history
+                .lock()
+                .unwrap()
+                .get(&msg.client_snapshot_hash)
+                .cloned()
+                .unwrap_or_else(|| current_state.clone());
+
+            let patch = three_way_merge(&base_state, &current_state, &msg.payload, &self.schema);
             let resp = ServerMessage::Reject(RejectResponse {
                 op_id: msg.op_id.clone(),
                 reason: format!(
@@ -111,6 +145,7 @@ impl Reconciler {
                     msg.client_snapshot_hash, server_hash
                 ),
                 patch,
+                retry_after_ms: None,
             });
             self.event_store.append(msg.clone(), OpOutcome::Rejected);
             self.broadcaster.publish(resp.clone());
@@ -126,6 +161,7 @@ impl Reconciler {
                 op_id: msg.op_id.clone(),
                 reason,
                 patch: empty_patch(),
+                retry_after_ms: None,
             });
             self.event_store.append(msg.clone(), OpOutcome::Rejected);
             self.broadcaster.publish(resp.clone());
@@ -133,12 +169,20 @@ impl Reconciler {
             return resp;
         }
 
-        // 6. Apply the op: merge payload into authoritative state
-        let new_state = apply_op(&current_state, &msg.payload, &self.schema);
+        // 6. Apply the op: merge payload into authoritative state (CRDT-aware)
+        let instance_key = EventStore::partition_key(msg);
+        let new_state = {
+            let mut crdt_docs = self.crdt_docs.lock().unwrap();
+            apply_op_with_crdt(&current_state, &msg.payload, &self.schema, &mut crdt_docs, &instance_key)
+        };
         let new_hash = hash_state(&new_state);
 
-        // 7. Persist
-        *self.state.lock().unwrap() = new_state;
+        // 7. Persist and update snapshot history
+        *self.state.lock().unwrap() = new_state.clone();
+        self.snapshot_history
+            .lock()
+            .unwrap()
+            .insert(new_hash.clone(), new_state);
         self.event_store.append(msg.clone(), OpOutcome::Accepted);
         self.limits.dequeue_op(&msg.tenant_id);
 
@@ -169,39 +213,77 @@ impl Default for Reconciler {
 
 // ── helpers ───────────────────────────────────────────────────────────────────
 
-/// Build a three-way patch comparing the server's authoritative state against
-/// the client's proposed payload, annotating each conflicting field with its
-/// schema-registered strategy.
-fn build_three_way_patch(
-    server_state: &Value,
-    client_payload: &Value,
+/// Perform a **true 3-way merge** of `base` (last common ancestor), `server`
+/// (current authoritative state), and `client` (proposed payload).
+///
+/// This is a **pure function** with no side-effects, making it straightforward
+/// to unit-test with arbitrary input triples.
+///
+/// ## Three states
+/// | Symbol | Meaning |
+/// |--------|---------|
+/// | `base` | The snapshot the client was working from (keyed by `client_snapshot_hash`). |
+/// | `server` | The current authoritative state (may have advanced past `base`). |
+/// | `client` | The payload the client wants to apply. |
+///
+/// ## Conflict detection
+///
+/// A conflict arises only when **both** the server and the client changed the
+/// same field relative to `base`.  Fields changed only by one side are
+/// non-conflicting and can be auto-applied.
+///
+/// ## Output
+/// * `base_snapshot` – the base state (so the UI can show "what you started from").
+/// * `local_diff` – fields changed by the client relative to `base`.
+/// * `server_diff` – fields changed by the server relative to `base`.
+/// * `conflicts` – fields changed by *both* sides (non-CRDT) with resolved values.
+pub fn three_way_merge(
+    base: &Value,
+    server: &Value,
+    client: &Value,
     schema: &DocumentSchema,
 ) -> ThreeWayPatch {
     let mut conflicts = Vec::new();
 
-    if let (Value::Object(server_obj), Value::Object(client_obj)) = (server_state, client_payload) {
+    if let (
+        Value::Object(base_obj),
+        Value::Object(server_obj),
+        Value::Object(client_obj),
+    ) = (base, server, client)
+    {
         for (key, client_val) in client_obj {
             let path = format!("/{key}");
             let strategy = schema.strategy_for(&path);
-            if let Some(server_val) = server_obj.get(key) {
-                if server_val != client_val {
-                    let resolved = resolve_field(server_val, client_val, strategy);
-                    conflicts.push(FieldConflict {
-                        path: path.clone(),
-                        strategy: strategy.into(),
-                        resolved_value: resolved,
-                    });
-                }
+            let base_val = base_obj.get(key);
+            let server_val = server_obj.get(key);
+
+            // Client changed this field relative to base?
+            let client_changed = base_val != Some(client_val);
+            // Server changed this field relative to base?
+            let server_changed = base_val != server_val;
+
+            // A true conflict: both sides diverged from base on the same field.
+            if client_changed && server_changed {
+                let resolved = resolve_field(
+                    server_val.unwrap_or(&Value::Null),
+                    client_val,
+                    strategy,
+                );
+                conflicts.push(FieldConflict {
+                    path,
+                    strategy: strategy.into(),
+                    resolved_value: resolved,
+                });
             }
         }
     }
 
-    // Compute JSON-diff style diffs (shallow object diff for now)
-    let local_diff = object_diff(server_state, client_payload);
-    let server_diff = Value::Null; // populated by Temporal replay in full implementation
+    // Compute diffs relative to the base state.
+    let local_diff = object_diff(base, client);
+    let server_diff = object_diff(base, server);
 
     ThreeWayPatch {
-        base_snapshot: server_state.clone(),
+        base_snapshot: base.clone(),
         local_diff,
         server_diff,
         conflicts,
@@ -209,12 +291,16 @@ fn build_three_way_patch(
 }
 
 /// Resolve a conflicting field value based on its strategy.
+///
+/// For `YjsText` fields the server value is already the CRDT-merged result
+/// (computed by [`apply_op_with_crdt`] during the last accepted op).  For
+/// `Lww` fields the server value wins (authoritative last-write).
 fn resolve_field(server_val: &Value, _client_val: &Value, strategy: FieldStrategy) -> Value {
     match strategy {
         // For LWW the server wins (last authoritative write)
         FieldStrategy::Lww => server_val.clone(),
-        // For CRDT fields the client sends a Yrs binary update encoded as base64;
-        // the full merge is handled by the CRDT layer (out of scope for the resolver stub)
+        // For CRDT fields the server value already reflects the auto-merge
+        // performed by the reconciler's CrdtDoc layer.
         FieldStrategy::YjsText => server_val.clone(),
         // Transactional fields should never reach here (caught earlier)
         FieldStrategy::Transactional => server_val.clone(),
@@ -241,12 +327,46 @@ fn object_diff(base: &Value, patch: &Value) -> Value {
 }
 
 /// Apply the client's payload to the server state, respecting field strategies.
-fn apply_op(state: &Value, payload: &Value, _schema: &DocumentSchema) -> Value {
+///
+/// For [`FieldStrategy::YjsText`] fields the payload value is expected to be
+/// a base64url-encoded [yrs v1 update](https://docs.rs/yrs).  The update is
+/// applied to the per-instance [`CrdtDoc`] and the merged text string is stored
+/// in the authoritative state.  Plain string values are treated as direct
+/// overrides (for backwards-compatibility with non-CRDT clients).
+fn apply_op_with_crdt(
+    state: &Value,
+    payload: &Value,
+    schema: &DocumentSchema,
+    crdt_docs: &mut HashMap<String, CrdtDoc>,
+    instance_key: &str,
+) -> Value {
     match (state, payload) {
         (Value::Object(base), Value::Object(patch)) => {
             let mut merged = base.clone();
             for (k, v) in patch {
-                merged.insert(k.clone(), v.clone());
+                let path = format!("/{k}");
+                if schema.strategy_for(&path) == FieldStrategy::YjsText {
+                    let doc_key = format!("{instance_key}:{k}");
+                    let doc = crdt_docs
+                        .entry(doc_key)
+                        .or_insert_with(|| CrdtDoc::new(k.as_str()));
+                    // Client sends a base64-encoded yrs binary update.
+                    let merged_val = if let Some(b64) = v.as_str() {
+                        match base64::engine::general_purpose::STANDARD.decode(b64) {
+                            Ok(bytes) => match doc.apply_update(&bytes) {
+                                Ok(()) => Value::String(doc.get_string()),
+                                Err(_) => v.clone(),
+                            },
+                            // Not a valid base64 string – treat as a plain-text override.
+                            Err(_) => v.clone(),
+                        }
+                    } else {
+                        v.clone()
+                    };
+                    merged.insert(k.clone(), merged_val);
+                } else {
+                    merged.insert(k.clone(), v.clone());
+                }
             }
             Value::Object(merged)
         }
@@ -294,6 +414,7 @@ fn empty_patch() -> ThreeWayPatch {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use policy_core::crdt::{FieldSchema, FieldStrategy};
     use serde_json::json;
 
     fn make_msg(op_id: &str, hash: &str) -> ClientMessage {
@@ -376,10 +497,174 @@ mod tests {
         };
         let resp = r.reconcile(&msg);
         if let ServerMessage::Reject(rej) = resp {
-            // base_snapshot must reflect authoritative state
+            // base_snapshot: "wrong" hash not in history, falls back to current state
             assert_eq!(rej.patch.base_snapshot["x"], json!(10));
         } else {
             panic!("expected Reject");
         }
+    }
+
+    /// Test the pure `three_way_merge` function independently of the reconciler.
+    #[test]
+    fn three_way_merge_computes_server_diff_and_local_diff() {
+        let schema = DocumentSchema::default();
+        let base = json!({ "a": 1, "b": 2 });
+        // Server advanced field `a` to 5 since the base.
+        let server = json!({ "a": 5, "b": 2 });
+        // Client changed field `b` to 9 based on the base.
+        let client = json!({ "a": 1, "b": 9 });
+
+        let patch = three_way_merge(&base, &server, &client, &schema);
+
+        // local_diff should show the client's change to `b`.
+        assert_eq!(patch.local_diff["b"], json!(9));
+        assert!(patch.local_diff.get("a").is_none());
+
+        // server_diff should show the server's change to `a`.
+        assert_eq!(patch.server_diff["a"], json!(5));
+        assert!(patch.server_diff.get("b").is_none());
+
+        // There should be no conflict on `b` (only server changed `a`, only
+        // client changed `b`).
+        assert!(
+            patch.conflicts.iter().all(|c| c.path != "/b"),
+            "b should not be a conflict"
+        );
+    }
+
+    /// Test that when both sides change the same field it appears in conflicts.
+    #[test]
+    fn three_way_merge_detects_field_conflict() {
+        let schema = DocumentSchema::default();
+        let base = json!({ "x": 1 });
+        let server = json!({ "x": 10 });
+        let client = json!({ "x": 99 });
+
+        let patch = three_way_merge(&base, &server, &client, &schema);
+
+        // /x is changed by both sides → should be in conflicts.
+        assert_eq!(patch.conflicts.len(), 1);
+        assert_eq!(patch.conflicts[0].path, "/x");
+        // LWW → server wins.
+        assert_eq!(patch.conflicts[0].resolved_value, json!(10));
+    }
+
+    /// Test that known base state is used when the client hash is in history.
+    #[test]
+    fn reconciler_uses_stored_base_for_three_way_merge() {
+        let r = Reconciler::new();
+
+        // Step 1: accept an op that changes `a` from 0 to 1.
+        let h0 = hash_state(&r.current_state());
+        let op1 = ClientMessage {
+            op_id: "op1".into(),
+            payload: json!({ "a": 1 }),
+            client_snapshot_hash: h0.clone(),
+            ..make_msg("op1", "")
+        };
+        r.reconcile(&op1);
+
+        // The hash after op1.
+        let h1 = hash_state(&r.current_state());
+
+        // Step 2: server advances `b` while client is still at h1.
+        let op2 = ClientMessage {
+            op_id: "op2".into(),
+            payload: json!({ "b": 99 }),
+            client_snapshot_hash: h1.clone(),
+            ..make_msg("op2", "")
+        };
+        r.reconcile(&op2);
+
+        // Step 3: client (still at h1) tries to change `a`.
+        // Hash mismatch → reject with 3-way patch where base=state@h1.
+        let op3 = ClientMessage {
+            op_id: "op3".into(),
+            payload: json!({ "a": 42 }),
+            client_snapshot_hash: h1.clone(), // client was at h1, not h2
+            ..make_msg("op3", "")
+        };
+        let resp = r.reconcile(&op3);
+        if let ServerMessage::Reject(rej) = resp {
+            // base_snapshot should be the state at h1 = { a: 1 }
+            assert_eq!(rej.patch.base_snapshot["a"], json!(1));
+            // server_diff should show the b=99 change the server made.
+            assert_eq!(rej.patch.server_diff["b"], json!(99));
+        } else {
+            panic!("expected Reject");
+        }
+    }
+
+    /// Backpressure rejection must carry a Retry-After hint.
+    #[test]
+    fn backpressure_rejection_has_retry_after_ms() {
+        let r = Reconciler::new();
+        // Configure a very small queue limit for tenant1.
+        r.limits.set_limits(
+            "tenant1",
+            crate::limits::TenantLimits {
+                max_queued_ops: 0,
+                max_ws_connections: 100,
+            },
+        );
+        let hash = hash_state(&r.current_state());
+        let msg = make_msg("op-bp", &hash);
+        let resp = r.reconcile(&msg);
+        if let ServerMessage::Reject(rej) = resp {
+            assert!(
+                rej.retry_after_ms.is_some(),
+                "backpressure rejection must set retry_after_ms"
+            );
+        } else {
+            panic!("expected Reject");
+        }
+    }
+
+    /// Test that the snapshot history is stored and keyed by hash.
+    #[test]
+    fn snapshot_history_is_populated_after_accepted_op() {
+        let r = Reconciler::new();
+        let h0 = hash_state(&r.current_state());
+        let msg = ClientMessage {
+            op_id: "snap-op".into(),
+            payload: json!({ "z": 7 }),
+            client_snapshot_hash: h0,
+            ..make_msg("snap-op", "")
+        };
+        r.reconcile(&msg);
+        let h1 = hash_state(&r.current_state());
+        // The new hash should be stored in snapshot history.
+        let history = r.snapshot_history.lock().unwrap();
+        assert!(history.contains_key(&h1), "h1 must be in snapshot_history");
+        assert_eq!(history[&h1]["z"], json!(7));
+    }
+
+    /// Test YjsText CRDT merge path via base64-encoded yrs updates.
+    #[test]
+    fn crdt_yjs_text_field_is_merged() {
+        use policy_core::crdt::CrdtDoc;
+        let schema = DocumentSchema {
+            fields: vec![FieldSchema {
+                path: "/notes".into(),
+                strategy: FieldStrategy::YjsText,
+            }],
+        };
+
+        // Build a yrs update from a local doc that inserts "hello".
+        let local_doc = CrdtDoc::new("notes");
+        local_doc.insert(0, "hello");
+        let update_bytes = local_doc.encode_state();
+        let b64 = base64::engine::general_purpose::STANDARD.encode(&update_bytes);
+
+        let mut crdt_docs = HashMap::new();
+        let result = apply_op_with_crdt(
+            &json!({}),
+            &json!({ "notes": b64 }),
+            &schema,
+            &mut crdt_docs,
+            "tenant1:wf1:inst1",
+        );
+
+        assert_eq!(result["notes"], json!("hello"));
     }
 }

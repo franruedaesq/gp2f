@@ -6,6 +6,7 @@ export type {
   RejectResponse,
   ThreeWayPatch,
   FieldConflict,
+  HelloMessage,
 } from "./wire";
 
 // WebSocket client
