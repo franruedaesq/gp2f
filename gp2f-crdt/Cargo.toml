@@ -1,0 +1,23 @@
+[package]
+name = "gp2f-crdt"
+version.workspace = true
+edition.workspace = true
+authors.workspace = true
+license.workspace = true
+description = "GP2F conflict resolution logic"
+
+[features]
+default = ["redis-broadcast"]
+redis-broadcast = ["gp2f-broadcast/redis-broadcast", "gp2f-token/redis-broadcast"]
+
+[dependencies]
+gp2f-core = { path = "../gp2f-core" }
+gp2f-security = { path = "../gp2f-security" }
+gp2f-store = { path = "../gp2f-store" }
+gp2f-broadcast = { path = "../gp2f-broadcast", default-features = false }
+gp2f-token = { path = "../gp2f-token", default-features = false }
+policy-core = { path = "../policy-core", features = ["std"] }
+serde.workspace = true
+serde_json.workspace = true
+chrono.workspace = true
+base64 = "0.22"

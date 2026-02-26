@@ -1,0 +1,23 @@
+[package]
+name = "gp2f-actor"
+version.workspace = true
+edition.workspace = true
+authors.workspace = true
+license.workspace = true
+description = "GP2F actor model implementation and lifecycle"
+
+[features]
+default = ["redis-broadcast"]
+redis-broadcast = ["dep:redis", "gp2f-crdt/redis-broadcast", "gp2f-security/redis-broadcast"]
+
+[dependencies]
+gp2f-core = { path = "../gp2f-core" }
+gp2f-security = { path = "../gp2f-security" }
+gp2f-store = { path = "../gp2f-store" }
+gp2f-crdt = { path = "../gp2f-crdt", default-features = false }
+policy-core = { path = "../policy-core", features = ["std"] }
+serde.workspace = true
+serde_json.workspace = true
+tokio = { version = "1", features = ["full"] }
+redis = { version = "0.27", features = ["aio", "tokio-comp", "connection-manager"], optional = true }
+tracing = "0.1"

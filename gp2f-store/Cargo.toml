@@ -1,0 +1,22 @@
+[package]
+name = "gp2f-store"
+version.workspace = true
+edition.workspace = true
+authors.workspace = true
+license.workspace = true
+description = "GP2F persistence abstractions and implementations"
+
+[features]
+postgres-store = ["dep:sqlx"]
+temporal-production = []
+
+[dependencies]
+gp2f-core = { path = "../gp2f-core" }
+serde.workspace = true
+serde_json.workspace = true
+thiserror.workspace = true
+chrono.workspace = true
+tracing = "0.1"
+async-trait = "0.1"
+tokio = { version = "1", features = ["full"] }
+sqlx = { version = "0.8", features = ["runtime-tokio", "tls-native-tls", "postgres", "json", "chrono"], optional = true }

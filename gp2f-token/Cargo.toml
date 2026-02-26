@@ -1,0 +1,24 @@
+[package]
+name = "gp2f-token"
+version.workspace = true
+edition.workspace = true
+authors.workspace = true
+license.workspace = true
+description = "GP2F token management and rate limiting"
+
+[features]
+default = ["redis-broadcast"]
+redis-broadcast = ["dep:redis"]
+
+[dependencies]
+gp2f-core = { path = "../gp2f-core" }
+gp2f-security = { path = "../gp2f-security" }
+serde.workspace = true
+serde_json.workspace = true
+thiserror.workspace = true
+blake3.workspace = true
+tracing = "0.1"
+async-trait = "0.1"
+tokio = { version = "1", features = ["full"] }
+redis = { version = "0.27", features = ["aio", "tokio-comp", "connection-manager"], optional = true }
+rand = "0.8"

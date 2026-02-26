@@ -104,7 +104,6 @@ impl CrdtDoc {
     }
 }
 
-
 #[cfg(test)]
 mod tests {
     use super::*;

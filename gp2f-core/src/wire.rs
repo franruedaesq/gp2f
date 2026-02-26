@@ -101,7 +101,7 @@ fn is_invisible_unicode(c: char) -> bool {
 /// attacks, and control-character injections from being stored in the event log.
 fn sanitize_field(s: &str) -> String {
     s.chars()
-        .filter(|&c| !(c.is_control() && c != '\t' && c != '\n') && !is_invisible_unicode(c))
+        .filter(|&c| !(is_invisible_unicode(c) || c.is_control() && c != '\t' && c != '\n'))
         .collect()
 }
 
@@ -138,9 +138,7 @@ impl ClientMessage {
             ));
         }
         if self.action.len() > MAX_LABEL_LEN {
-            return Err(format!(
-                "action exceeds maximum length of {MAX_LABEL_LEN}"
-            ));
+            return Err(format!("action exceeds maximum length of {MAX_LABEL_LEN}"));
         }
         if self.tenant_id.len() > MAX_ID_LEN {
             return Err(format!("tenant_id exceeds maximum length of {MAX_ID_LEN}"));

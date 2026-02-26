@@ -340,7 +340,8 @@ impl ActorRegistry {
             return Ok(handle.clone());
         }
         let reconciler = (self.reconciler_factory)();
-        let (actor, handle) = WorkflowActor::new(key.clone(), reconciler, self.persistent_store.clone());
+        let (actor, handle) =
+            WorkflowActor::new(key.clone(), reconciler, self.persistent_store.clone());
         tokio::spawn(actor.run());
         map.insert(key.clone(), handle.clone());
 
