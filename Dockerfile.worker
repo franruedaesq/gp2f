@@ -1,0 +1,53 @@
+# GP2F Temporal Worker – Production Dockerfile
+#
+# Phase 10 requirement 6: Docker image for the Temporal activity worker.
+# The worker executes ApplyOp activities on behalf of the WorkflowInstance
+# Temporal workflow.
+#
+# Build:
+#   docker build -f Dockerfile.worker -t gp2f/worker:latest .
+#
+# Run:
+#   docker run \
+#     -e TEMPORAL_ENDPOINT=temporal.prod.example.com:7233 \
+#     -e TEMPORAL_NAMESPACE=gp2f-prod \
+#     -e RUST_LOG=info \
+#     gp2f/worker:latest
+
+# ── stage 1: build ────────────────────────────────────────────────────────────
+FROM rust:1.78-slim-bookworm AS builder
+
+WORKDIR /workspace
+
+COPY Cargo.toml Cargo.lock ./
+COPY policy-core/Cargo.toml policy-core/
+COPY server/Cargo.toml server/
+COPY cli/Cargo.toml cli/
+
+RUN mkdir -p policy-core/src server/src cli/src \
+    && echo "fn main(){}" > server/src/main.rs \
+    && echo "" > policy-core/src/lib.rs \
+    && echo "fn main(){}" > cli/src/main.rs \
+    && cargo fetch
+
+COPY . .
+
+# Build the server binary (the worker entry point is embedded in the same binary
+# and activated via the TEMPORAL_ENDPOINT env var).
+RUN cargo build --release -p gp2f-server
+
+# ── stage 2: runtime ─────────────────────────────────────────────────────────
+FROM gcr.io/distroless/cc-debian12:latest
+
+WORKDIR /app
+
+COPY --from=builder /workspace/target/release/gp2f-server /app/gp2f-worker
+
+USER 65534
+
+ENV RUST_LOG=info
+# Worker mode is activated when TEMPORAL_ENDPOINT is set.
+# The server binary automatically routes all ops to Temporal instead of the
+# in-memory fallback when this variable is present.
+
+ENTRYPOINT ["/app/gp2f-worker"]
