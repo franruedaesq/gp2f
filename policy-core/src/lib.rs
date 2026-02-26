@@ -9,7 +9,9 @@
 extern crate alloc;
 
 pub mod ast;
-// CRDT support relies on `yrs`, which requires std.
+// Schema / strategy types — available in std AND no_std (no yrs dependency).
+pub mod crdt_schema;
+// Full CRDT support (CrdtDoc backed by yrs) requires std.
 #[cfg(feature = "std")]
 pub mod crdt;
 pub mod evaluator;
@@ -17,8 +19,11 @@ pub mod timestamp;
 pub mod version;
 
 pub use ast::{AstNode, NodeKind};
+// Re-export schema types from the always-available crdt_schema module so
+// existing callers that use `policy_core::crdt_schema::*` work out of the box.
+pub use crdt_schema::{DocumentSchema, FieldSchema, FieldStrategy};
 #[cfg(feature = "std")]
-pub use crdt::{CrdtDoc, DocumentSchema, FieldSchema, FieldStrategy};
+pub use crdt::CrdtDoc;
 pub use evaluator::{EvalResult, Evaluator};
 pub use timestamp::normalize_timestamp;
 pub use version::VersionPolicy;

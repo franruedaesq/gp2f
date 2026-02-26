@@ -2,25 +2,17 @@
 //!
 //! Integrates [`yrs`] (Rust port of Yjs) for collaborative-editable fields.
 //! Non-CRDT fields use LWW (last-write-wins) or TRANSACTIONAL semantics.
+//!
+//! Schema/strategy types (`FieldStrategy`, `FieldSchema`, `DocumentSchema`) live
+//! in [`crate::crdt_schema`] so they are available in `no_std` environments too.
+//! They are re-exported here for convenience.
 
-use serde::{Deserialize, Serialize};
 use yrs::updates::decoder::Decode;
 use yrs::{Doc, GetString, Options, ReadTxn, Text, TextRef, Transact, Update};
 
-/// Per-field conflict resolution strategy registered in the schema.
-///
-/// Each field in the document schema carries one of these strategies.
-/// The server and client agree on the strategy at schema-registration time.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(rename_all = "kebab-case")]
-pub enum FieldStrategy {
-    /// CRDT collaborative text (backed by `yrs::Text`).
-    YjsText,
-    /// Last-Write-Wins scalar — no merge needed.
-    Lww,
-    /// Transactional — reject the whole op if this field conflicts.
-    Transactional,
-}
+// Re-export the no_std-compatible schema types so callers can continue to use
+// `policy_core::crdt::{DocumentSchema, FieldSchema, FieldStrategy}`.
+pub use crate::crdt_schema::{DocumentSchema, FieldSchema, FieldStrategy};
 
 /// A lightweight CRDT document wrapper around [`yrs::Doc`].
 ///
@@ -112,33 +104,6 @@ impl CrdtDoc {
     }
 }
 
-/// Schema entry for a single document field.
-#[derive(Debug, Clone, Serialize, Deserialize)]
-#[serde(rename_all = "camelCase")]
-pub struct FieldSchema {
-    /// JSON-pointer path (e.g. `/notes`).
-    pub path: String,
-    /// The conflict resolution strategy for this field.
-    pub strategy: FieldStrategy,
-}
-
-/// A complete document schema: an ordered list of [`FieldSchema`] entries.
-#[derive(Debug, Clone, Default, Serialize, Deserialize)]
-pub struct DocumentSchema {
-    pub fields: Vec<FieldSchema>,
-}
-
-impl DocumentSchema {
-    /// Look up the strategy for a given JSON-pointer path.
-    /// Falls back to [`FieldStrategy::Lww`] if the path is not registered.
-    pub fn strategy_for(&self, path: &str) -> FieldStrategy {
-        self.fields
-            .iter()
-            .find(|f| f.path == path)
-            .map(|f| f.strategy)
-            .unwrap_or(FieldStrategy::Lww)
-    }
-}
 
 #[cfg(test)]
 mod tests {

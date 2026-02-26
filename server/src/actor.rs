@@ -29,7 +29,9 @@ use std::{
 use tokio::sync::{broadcast, mpsc, oneshot};
 
 use crate::{
+    event_store::OpOutcome,
     reconciler::Reconciler,
+    temporal_store::PersistentStore,
     wire::{ClientMessage, ServerMessage},
 };
 
@@ -97,16 +99,20 @@ struct WorkflowActor {
     rx: mpsc::Receiver<ActorMessage>,
     reconciler: Arc<Reconciler>,
     broadcast_tx: broadcast::Sender<ServerMessage>,
+    /// Durable event store – every op outcome is persisted here so state
+    /// survives pod restarts and actor evictions.
+    persistent_store: Arc<dyn PersistentStore>,
 }
 
 impl WorkflowActor {
-    fn new(reconciler: Arc<Reconciler>) -> (Self, ActorHandle) {
+    fn new(reconciler: Arc<Reconciler>, persistent_store: Arc<dyn PersistentStore>) -> (Self, ActorHandle) {
         let (tx, rx) = mpsc::channel(ACTOR_CHANNEL_CAPACITY);
         let (broadcast_tx, _) = broadcast::channel(BROADCAST_CAPACITY);
         let actor = Self {
             rx,
             reconciler,
             broadcast_tx,
+            persistent_store,
         };
         (actor, ActorHandle { tx })
     }
@@ -116,6 +122,13 @@ impl WorkflowActor {
             match msg {
                 ActorMessage::Reconcile { msg, reply_tx } => {
                     let response = self.reconciler.reconcile(&msg);
+                    // Persist to the durable store so state survives restarts.
+                    let outcome = match &response {
+                        ServerMessage::Accept(_) => OpOutcome::Accepted,
+                        _ => OpOutcome::Rejected,
+                    };
+                    let seq = self.persistent_store.append((*msg).clone(), outcome).await;
+                    tracing::debug!(op_id = %msg.op_id, seq, "op persisted to durable store");
                     // Broadcast to subscribed WebSocket clients (ignore errors
                     // when there are no subscribers).
                     let _ = self.broadcast_tx.send(response.clone());
@@ -142,20 +155,45 @@ pub struct ActorRegistry {
     /// Shared reconciler – actors wrap it (one per workflow instance so there
     /// is no lock contention across instances).
     reconciler_factory: Arc<dyn Fn() -> Arc<Reconciler> + Send + Sync>,
+    /// Durable event store shared across all actors in this registry.
+    persistent_store: Arc<dyn PersistentStore>,
 }
 
 impl ActorRegistry {
-    /// Create a registry backed by default reconcilers.
+    /// Create a registry backed by default reconcilers and an in-memory store.
     pub fn new() -> Self {
-        Self::with_factory(Arc::new(|| Arc::new(Reconciler::new())))
+        use crate::temporal_store::InMemoryStore;
+        Self::with_store(Arc::new(InMemoryStore::new()))
     }
 
-    /// Create a registry with a custom reconciler factory (useful for testing).
-    pub fn with_factory(factory: Arc<dyn Fn() -> Arc<Reconciler> + Send + Sync>) -> Self {
+    /// Create a registry backed by the provided durable [`PersistentStore`].
+    ///
+    /// Every actor spawned by this registry will persist op outcomes to
+    /// `store`, ensuring data survives pod restarts and actor evictions.
+    pub fn with_store(store: Arc<dyn PersistentStore>) -> Self {
+        Self::with_factory_and_store(Arc::new(|| Arc::new(Reconciler::new())), store)
+    }
+
+    /// Create a registry with a custom reconciler factory and persistent store
+    /// (useful for testing).
+    pub fn with_factory_and_store(
+        factory: Arc<dyn Fn() -> Arc<Reconciler> + Send + Sync>,
+        store: Arc<dyn PersistentStore>,
+    ) -> Self {
         Self {
             actors: Mutex::new(HashMap::new()),
             reconciler_factory: factory,
+            persistent_store: store,
         }
+    }
+
+    /// Create a registry with a custom reconciler factory (useful for testing).
+    ///
+    /// Uses an in-memory fallback store.  Prefer [`ActorRegistry::with_store`]
+    /// for production use to wire in the durable [`PersistentStore`].
+    pub fn with_factory(factory: Arc<dyn Fn() -> Arc<Reconciler> + Send + Sync>) -> Self {
+        use crate::temporal_store::InMemoryStore;
+        Self::with_factory_and_store(factory, Arc::new(InMemoryStore::new()))
     }
 
     /// Return the handle for the given `(tenant_id, workflow_id, instance_id)`,
@@ -172,7 +210,7 @@ impl ActorRegistry {
             return handle.clone();
         }
         let reconciler = (self.reconciler_factory)();
-        let (actor, handle) = WorkflowActor::new(reconciler);
+        let (actor, handle) = WorkflowActor::new(reconciler, self.persistent_store.clone());
         // Spawn a subscriber broadcast receiver before moving actor so we can
         // make the broadcast_tx available; here we just run the actor.
         tokio::spawn(actor.run());
