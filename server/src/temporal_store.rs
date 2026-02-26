@@ -254,11 +254,14 @@ impl TemporalStore {
         #[cfg(not(feature = "temporal-production"))]
         {
             *self.connected.lock().await = true;
-            tracing::info!(
+            tracing::warn!(
                 endpoint = %self.endpoint,
                 namespace = %self.namespace,
                 retention_days = self.retention_days,
-                "TemporalStore running in fallback (in-memory) mode"
+                "TemporalStore running in fallback (in-memory) mode – \
+                 long-running workflows, timers, and external signals are NOT \
+                 durable. Enable the `temporal-production` feature and integrate \
+                 the temporal-client SDK for production use."
             );
         }
         Ok(())
