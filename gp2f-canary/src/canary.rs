@@ -80,8 +80,9 @@ impl FailureWindow {
     /// Failure rate over the last [`FAILURE_WINDOW`].  Returns `None` when
     /// there are no samples in the window.
     fn failure_rate(&mut self) -> Option<f64> {
-        let cutoff = Instant::now() - FAILURE_WINDOW;
-        self.samples.retain(|s| s.ts >= cutoff);
+        if let Some(cutoff) = Instant::now().checked_sub(FAILURE_WINDOW) {
+            self.samples.retain(|s| s.ts >= cutoff);
+        }
         if self.samples.is_empty() {
             return None;
         }
