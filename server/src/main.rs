@@ -70,6 +70,21 @@ async fn main() {
             .init();
     }
 
+    // ── Production guard: REDIS_URL required when redis-broadcast is enabled ─
+    #[cfg(feature = "redis-broadcast")]
+    {
+        let is_production = std::env::var("APP_ENV")
+            .map(|v| v.eq_ignore_ascii_case("production"))
+            .unwrap_or(false);
+        if is_production && gp2f_server::secrets::resolve_secret("REDIS_URL").is_none() {
+            panic!(
+                "REDIS_URL (or REDIS_URL_FILE) must be set when APP_ENV=production \
+                 and the redis-broadcast feature is enabled. \
+                 Set REDIS_URL to your Redis connection string or unset APP_ENV to run in non-production mode."
+            );
+        }
+    }
+
     // ── Wasmtime policy engine (optional) ──────────────────────────────────
     let wasm_path =
         std::env::var("POLICY_WASM_PATH").unwrap_or_else(|_| "policy_wasm_bg.wasm".to_string());

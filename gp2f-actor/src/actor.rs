@@ -707,4 +707,42 @@ mod tests {
             "recovered actor must reject a duplicate op_id"
         );
     }
+
+    /// Load test: many concurrent `get_or_spawn` calls for the same instance key
+    /// must never create more than one actor (split-brain within a single replica).
+    ///
+    /// This simulates a surge of requests hitting the same instance simultaneously
+    /// and verifies that the in-process mutex prevents duplicate actor creation.
+    #[tokio::test]
+    async fn concurrent_spawn_requests_create_only_one_actor() {
+        use std::sync::Arc;
+
+        let registry = Arc::new(ActorRegistry::new());
+        let num_tasks = 50;
+
+        let handles: Vec<_> = (0..num_tasks)
+            .map(|i| {
+                let registry = registry.clone();
+                tokio::spawn(async move {
+                    registry
+                        .get_or_spawn("load-tenant", "load-wf", "load-inst")
+                        .await
+                        .map_err(|e| format!("task {i}: get_or_spawn failed: {e:?}"))
+                })
+            })
+            .collect();
+
+        let results = futures::future::join_all(handles).await;
+        // Every task must succeed (no panics or errors).
+        for (i, r) in results.into_iter().enumerate() {
+            r.unwrap()
+                .unwrap_or_else(|e| panic!("task {i} returned Err: {e}"));
+        }
+        // Exactly one actor must exist regardless of concurrency.
+        assert_eq!(
+            registry.instance_count(),
+            1,
+            "concurrent spawns must not create duplicate actors"
+        );
+    }
 }
