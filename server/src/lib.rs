@@ -1,7 +1,9 @@
 pub mod broadcast;
+pub mod chaos;
 pub mod event_store;
 pub mod handlers;
 pub mod limits;
+pub mod pilot_workflows;
 pub mod rbac;
 pub mod reconciler;
 pub mod replay_protection;
