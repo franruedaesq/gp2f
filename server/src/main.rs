@@ -89,24 +89,29 @@ async fn main() {
                     Arc::new(store)
                 }
                 Err(e) => {
-                    tracing::warn!("Postgres connect failed ({e}); using in-memory fallback");
-                    Arc::new(InMemoryStore::new())
+                    panic!(
+                        "DATABASE_URL is set but Postgres connection failed: {e}. \
+                         Fix the connection or unset DATABASE_URL to use the in-memory store."
+                    );
                 }
             }
         }
         #[cfg(not(feature = "postgres-store"))]
         {
             let _ = db_url;
-            tracing::warn!(
-                "DATABASE_URL set but postgres-store feature is disabled; using in-memory fallback"
+            panic!(
+                "DATABASE_URL is set but the `postgres-store` feature is disabled. \
+                 Rebuild with `--features postgres-store` or unset DATABASE_URL."
             );
-            Arc::new(InMemoryStore::new())
         }
     } else if let Ok(endpoint) = std::env::var("TEMPORAL_ENDPOINT") {
         let namespace = std::env::var("TEMPORAL_NAMESPACE").unwrap_or_else(|_| "gp2f-prod".into());
         let store = TemporalStore::new(endpoint.clone(), namespace);
         if let Err(e) = store.connect().await {
-            tracing::warn!("Temporal connect failed ({e}); using in-memory fallback");
+            panic!(
+                "TEMPORAL_ENDPOINT is set but Temporal connection failed: {e}. \
+                 Fix the connection or unset TEMPORAL_ENDPOINT to use the in-memory store."
+            );
         }
         Arc::new(store)
     } else {
