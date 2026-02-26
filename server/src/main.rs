@@ -46,6 +46,8 @@ struct AppState {
     ai_rate_limiter: DynRateLimiter,
     /// Async ingestion queue for the `/op/async` low-latency endpoint.
     ingestion_queue: Arc<AsyncIngestionQueue>,
+    /// Persistent event store – used by the `/health` readiness probe.
+    event_store: Arc<dyn PersistentStore>,
 }
 
 #[tokio::main]
@@ -245,10 +247,12 @@ async fn main() {
         tool_gating: Arc::new(ToolGatingService::new()),
         ai_rate_limiter: build_rate_limiter().await,
         ingestion_queue: Arc::new(ingestion_queue),
+        event_store: event_store.clone(),
     };
 
     let app = Router::new()
         .route("/health", get(health_handler))
+        .route("/livez", get(livez_handler))
         .route("/ws", get(ws_handler))
         .route("/op", post(op_handler))
         .route("/op/async", post(op_async_handler))
@@ -271,8 +275,40 @@ async fn main() {
     axum::serve(listener, app).await.expect("server failed");
 }
 
-async fn health_handler() -> &'static str {
-    "ok"
+/// `GET /health` – readiness probe.
+///
+/// Returns **200 OK** with `{"status":"ok"}` when the event store is reachable
+/// and the server is ready to serve requests.
+/// Returns **503 Service Unavailable** with `{"status":"degraded","reason":"…"}`
+/// when the backing store cannot be contacted, so the Kubernetes readiness probe
+/// stops routing traffic to this pod until the store recovers.
+///
+/// **Note**: Use this endpoint only for the Kubernetes *readiness* probe, not
+/// the *liveness* probe.  Liveness should not depend on external systems; use
+/// a simpler check (e.g. `httpGet` on a static path) so the pod is not
+/// restarted due to a transient database outage.
+async fn health_handler(State(state): State<AppState>) -> impl IntoResponse {
+    if state.event_store.is_alive().await {
+        (StatusCode::OK, Json(serde_json::json!({ "status": "ok" })))
+    } else {
+        tracing::warn!("health check: event store is unreachable");
+        (
+            StatusCode::SERVICE_UNAVAILABLE,
+            Json(serde_json::json!({
+                "status": "degraded",
+                "reason": "event store unreachable"
+            })),
+        )
+    }
+}
+
+/// `GET /livez` – liveness probe.
+///
+/// Always returns **200 OK** as long as the process is running and the event
+/// loop is not deadlocked.  Does **not** check external dependencies so the
+/// pod is never restarted due to a transient database outage.
+async fn livez_handler() -> impl IntoResponse {
+    StatusCode::OK
 }
 
 async fn ws_handler(ws: WebSocketUpgrade, State(state): State<AppState>) -> impl IntoResponse {

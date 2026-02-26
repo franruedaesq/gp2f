@@ -284,4 +284,8 @@ impl PersistentStore for PostgresStore {
         };
         row.try_get::<i64, _>("cnt").unwrap_or(0) as usize
     }
+
+    async fn is_alive(&self) -> bool {
+        sqlx::query("SELECT 1").execute(&self.pool).await.is_ok()
+    }
 }
