@@ -1,6 +1,6 @@
 {
   "name": "@gp2f/server",
-  "version": "0.1.3",
+  "version": "0.1.4",
   "description": "Native Node.js bindings for the GP2F policy engine – powered by napi-rs",
   "main": "index.js",
   "types": "index.d.ts",
@@ -10,8 +10,8 @@
     "gp2f_node.*.node"
   ],
   "scripts": {
-    "build": "napi build --platform --release",
-    "build:debug": "napi build --platform",
+    "build": "napi build --platform --release --dts .napi-empty.d.ts",
+    "build:debug": "napi build --platform --dts .napi-empty.d.ts",
     "artifacts": "napi artifacts",
     "test": "jest --passWithNoTests"
   },
