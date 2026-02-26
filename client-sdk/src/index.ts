@@ -65,7 +65,7 @@ let _policyEngineCache: PolicyEngineModule | null = null;
  * Perform the actual dynamic import.
  *
  * Replace the module path with the real WASM package once it is published.
- * The `/* webpackChunkName */` magic comment tells bundlers (webpack / Vite)
+ * The `/* webpackChunkName  magic comment tells bundlers (webpack / Vite)
  * to emit this as a separate chunk so it is only downloaded on demand.
  */
 async function _importPolicyEngine(): Promise<PolicyEngineModule> {
@@ -84,13 +84,13 @@ async function _importPolicyEngine(): Promise<PolicyEngineModule> {
     if (typeof console !== "undefined") {
       console.warn(
         "[gp2f] WASM policy engine not found (@gp2f/policy-core-wasm). " +
-          "All policy evaluation will be performed server-side.",
+        "All policy evaluation will be performed server-side.",
       );
     }
     return {
       evaluate(_stateJson: string, _astJson: string) {
         throw new Error(
-          "WASM policy engine is not available. Install @gp2f/policy-core-wasm to enable client-side evaluation.",
+          "WASM policy engine is not available. Install @gp2f/policy-core-wasm to enable client-side evaluation."
         );
       },
     };

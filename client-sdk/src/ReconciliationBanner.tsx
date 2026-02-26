@@ -1,5 +1,6 @@
 import React from "react";
 import type { RejectResponse } from "./wire";
+import { UndoButton } from "./UndoButton";
 
 /**
  * Displayed as a dismissible banner at the top of the form whenever the server
