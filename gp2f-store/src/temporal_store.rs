@@ -270,8 +270,8 @@ impl TemporalStore {
         {
             // Production path: establish a gRPC connection to the Temporal
             // frontend using the temporalio-client SDK.
-            let url = Url::parse(&self.endpoint)
-                .map_err(|e| TemporalError::Connection(e.to_string()))?;
+            let url =
+                Url::parse(&self.endpoint).map_err(|e| TemporalError::Connection(e.to_string()))?;
             let conn_opts = ConnectionOptions::new(url)
                 .client_name("gp2f-server")
                 .client_version(env!("CARGO_PKG_VERSION"))
@@ -281,8 +281,8 @@ impl TemporalStore {
                 .map_err(|e| TemporalError::Connection(e.to_string()))?;
             let client_opts = ClientOptions::new(self.namespace.clone()).build();
             // SAFETY: ClientNewError is an uninhabited enum; new() never fails.
-            let temporal_client = TemporalClient::new(connection, client_opts)
-                .expect("Client::new is infallible");
+            let temporal_client =
+                TemporalClient::new(connection, client_opts).expect("Client::new is infallible");
             *self.client.lock().await = Some(temporal_client);
             *self.connected.lock().await = true;
             tracing::info!(
@@ -375,9 +375,7 @@ impl TemporalStore {
                 let guard = self.client.lock().await;
                 guard
                     .as_ref()
-                    .ok_or_else(|| {
-                        TemporalError::Signal("Temporal client not connected".into())
-                    })?
+                    .ok_or_else(|| TemporalError::Signal("Temporal client not connected".into()))?
                     .clone()
             };
             let handle = client.get_workflow_handle::<UntypedWorkflow>(&workflow_id);
