@@ -38,4 +38,14 @@ function loadNative() {
   )
 }
 
-module.exports = loadNative()
+const nativeAddon = loadNative()
+
+module.exports = nativeAddon
+
+// Explicitly assign named exports so Node.js CJS-ESM bridge can statically analyze them
+module.exports.JsGp2FServer = nativeAddon.JsGp2FServer
+module.exports.JsWorkflow = nativeAddon.JsWorkflow
+module.exports.NodeKind = nativeAddon.NodeKind
+module.exports.JsServerConfig = nativeAddon.JsServerConfig
+module.exports.JsActivityConfig = nativeAddon.JsActivityConfig
+module.exports.JsAstNode = nativeAddon.JsAstNode
