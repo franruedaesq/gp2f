@@ -1186,6 +1186,7 @@ dependencies = [
 name = "gp2f-actor"
 version = "0.1.0"
 dependencies = [
+ "futures",
  "gp2f-core",
  "gp2f-crdt",
  "gp2f-security",

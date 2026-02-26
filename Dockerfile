@@ -32,7 +32,7 @@ RUN mkdir -p policy-core/src server/src cli/src \
 
 # Now copy the full source and build the server binary.
 COPY . .
-RUN cargo build --release -p gp2f-server
+RUN cargo build --release -p gp2f-server --features redis-broadcast
 
 # ── stage 2: runtime ─────────────────────────────────────────────────────────
 FROM gcr.io/distroless/cc-debian12:latest
