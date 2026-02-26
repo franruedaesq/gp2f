@@ -12,14 +12,18 @@ use tracing_subscriber::{layer::SubscriberExt, util::SubscriberInitExt};
 
 use gp2f_server::{
     actor::ActorRegistry,
+    llm_provider::{build_provider, LlmMessage, LlmProvider, LlmRequest},
     middleware::{InMemoryPublicKeyStore, OpIdLayer},
+    rate_limit::AiRateLimiter,
     reconciler::Reconciler,
     redis_broadcast::{build_broadcaster, DynBroadcaster},
     temporal_store::{InMemoryStore, PersistentStore, TemporalStore},
     token_service::{MintRequest, RedeemRequest, TokenService},
+    tool_gating::ToolGatingService,
     wasm_engine::WasmtimeEngine,
-    wire::{ClientMessage, ServerMessage},
+    wire::{AgentProposeRequest, ClientMessage, ServerMessage},
 };
+use policy_core::evaluator::hash_state;
 
 #[derive(Clone)]
 struct AppState {
@@ -31,6 +35,12 @@ struct AppState {
     /// Persistent event store (Temporal in production, in-memory for dev).
     #[allow(dead_code)]
     event_store: Arc<dyn PersistentStore>,
+    /// LLM provider (OpenAI / Anthropic / Groq / Mock).
+    llm_provider: Arc<dyn LlmProvider>,
+    /// Tool gating service – decides which tools the LLM may see.
+    tool_gating: Arc<ToolGatingService>,
+    /// Per-tenant AI rate limiter and budget guard.
+    ai_rate_limiter: Arc<AiRateLimiter>,
 }
 
 #[tokio::main]
@@ -43,27 +53,27 @@ async fn main() {
         .init();
 
     // ── Wasmtime policy engine (optional) ──────────────────────────────────
-    let wasm_path = std::env::var("POLICY_WASM_PATH")
-        .unwrap_or_else(|_| "policy_wasm_bg.wasm".to_string());
+    let wasm_path =
+        std::env::var("POLICY_WASM_PATH").unwrap_or_else(|_| "policy_wasm_bg.wasm".to_string());
     match WasmtimeEngine::new(&wasm_path) {
         Ok(_engine) => tracing::info!(%wasm_path, "Wasmtime policy engine loaded"),
         Err(e) => tracing::info!("Wasmtime engine unavailable ({e}); using native evaluator"),
     }
 
     // ── Persistent event store ─────────────────────────────────────────────
-    let event_store: Arc<dyn PersistentStore> =
-        if let Ok(endpoint) = std::env::var("TEMPORAL_ENDPOINT") {
-            let namespace = std::env::var("TEMPORAL_NAMESPACE")
-                .unwrap_or_else(|_| "gp2f-prod".into());
-            let store = TemporalStore::new(endpoint.clone(), namespace);
-            if let Err(e) = store.connect().await {
-                tracing::warn!("Temporal connect failed ({e}); using in-memory fallback");
-            }
-            Arc::new(store)
-        } else {
-            tracing::info!("TEMPORAL_ENDPOINT not set; using in-memory event store");
-            Arc::new(InMemoryStore::new())
-        };
+    let event_store: Arc<dyn PersistentStore> = if let Ok(endpoint) =
+        std::env::var("TEMPORAL_ENDPOINT")
+    {
+        let namespace = std::env::var("TEMPORAL_NAMESPACE").unwrap_or_else(|_| "gp2f-prod".into());
+        let store = TemporalStore::new(endpoint.clone(), namespace);
+        if let Err(e) = store.connect().await {
+            tracing::warn!("Temporal connect failed ({e}); using in-memory fallback");
+        }
+        Arc::new(store)
+    } else {
+        tracing::info!("TEMPORAL_ENDPOINT not set; using in-memory event store");
+        Arc::new(InMemoryStore::new())
+    };
 
     // ── Redis / in-process broadcaster ────────────────────────────────────
     let broadcaster = build_broadcaster().await;
@@ -73,12 +83,18 @@ async fn main() {
     let key_store = Arc::new(InMemoryPublicKeyStore::new());
     let op_id_layer = OpIdLayer::new(key_store);
 
+    // ── LLM provider (OpenAI / Anthropic / Groq / Mock) ───────────────────
+    let llm_provider: Arc<dyn LlmProvider> = Arc::from(build_provider());
+
     let state = AppState {
         reconciler: Arc::new(Reconciler::new()),
         token_service: Arc::new(TokenService::new()),
         actor_registry: Arc::new(ActorRegistry::new()),
         broadcaster,
         event_store,
+        llm_provider,
+        tool_gating: Arc::new(ToolGatingService::new()),
+        ai_rate_limiter: Arc::new(AiRateLimiter::new()),
     };
 
     let app = Router::new()
@@ -88,6 +104,7 @@ async fn main() {
         .route("/token/mint", post(token_mint_handler))
         .route("/token/redeem", post(token_redeem_handler))
         .route("/ai/propose", post(ai_propose_handler))
+        .route("/agent/propose", post(agent_propose_handler))
         .with_state(state)
         .layer(op_id_layer)
         .layer(TraceLayer::new_for_http());
@@ -224,4 +241,191 @@ async fn ai_propose_handler(
         }
     }
     (StatusCode::OK, Json(response))
+}
+
+/// POST /agent/propose – production LLM proposal handler.
+///
+/// Full pipeline:
+/// 1. Per-tenant rate-limit check (token bucket + monthly budget guard).
+/// 2. Tool visibility gating via the AST evaluator.
+/// 3. LLM call (OpenAI / Anthropic / Groq / Mock) with `temperature=0`,
+///    `max_tokens=512`, `tool_choice="auto"`.
+/// 4. Validate the chosen tool against the allowed list.
+/// 5. Submit the resulting op through the actor/reconciler pipeline.
+/// 6. Log `proposal_rejected` audit events on any failure.
+async fn agent_propose_handler(
+    State(state): State<AppState>,
+    Json(req): Json<AgentProposeRequest>,
+) -> impl IntoResponse {
+    // 1. Rate-limit / budget check.
+    if let Err(e) = state.ai_rate_limiter.check_and_consume(&req.tenant_id) {
+        tracing::warn!(
+            tenant_id = %req.tenant_id,
+            error = %e,
+            "AI proposal rate-limited"
+        );
+        return (
+            StatusCode::TOO_MANY_REQUESTS,
+            Json(serde_json::json!({ "error": e.to_string() })),
+        )
+            .into_response();
+    }
+
+    // 2. Determine allowed tools from current workflow state.
+    let current_state = state.reconciler.current_state();
+    let allowed_tools = state
+        .tool_gating
+        .get_allowed_tools(&current_state, &req.ast_version);
+
+    // 3. Build the LLM system prompt from the vibe vector.
+    let vibe_description = req
+        .vibe
+        .as_ref()
+        .map(|v| {
+            format!(
+                "User intent: {} (confidence: {:.0}%, bottleneck: {})",
+                v.intent,
+                v.confidence * 100.0,
+                v.bottleneck
+            )
+        })
+        .unwrap_or_else(|| "No behavioral signal available.".into());
+
+    let system_prompt = format!(
+        "You are a workflow assistant operating inside a zero-trust policy engine. \
+         Current user state: {vibe_description}. \
+         Choose exactly one tool that best helps the user proceed. \
+         Respond only with a single tool call."
+    );
+
+    let user_content = req
+        .prompt
+        .clone()
+        .unwrap_or_else(|| "What is the most helpful next action?".into());
+
+    let llm_req = LlmRequest {
+        messages: vec![
+            LlmMessage {
+                role: "system".into(),
+                content: system_prompt,
+            },
+            LlmMessage {
+                role: "user".into(),
+                content: user_content,
+            },
+        ],
+        tools: allowed_tools.clone(),
+        temperature: 0.0,
+        max_tokens: 512,
+    };
+
+    // 4. Call the LLM provider.
+    let llm_resp = match state.llm_provider.complete(&llm_req).await {
+        Ok(r) => r,
+        Err(e) => {
+            tracing::warn!(
+                tenant_id = %req.tenant_id,
+                error = %e,
+                "LLM proposal failed"
+            );
+            return (
+                StatusCode::SERVICE_UNAVAILABLE,
+                Json(serde_json::json!({ "error": e.to_string() })),
+            )
+                .into_response();
+        }
+    };
+
+    tracing::info!(
+        provider = %llm_resp.provider,
+        prompt_hash = %llm_resp.prompt_hash,
+        tenant_id = %req.tenant_id,
+        "LLM proposal received"
+    );
+
+    // 5. Validate the chosen tool is in the allowed list.
+    let tool_call = match llm_resp.tool_call {
+        None => {
+            tracing::info!(
+                tenant_id = %req.tenant_id,
+                "LLM returned no tool call; proposal dropped"
+            );
+            return (
+                StatusCode::OK,
+                Json(serde_json::json!({ "status": "no_tool_chosen" })),
+            )
+                .into_response();
+        }
+        Some(tc) => tc,
+    };
+
+    if !allowed_tools.iter().any(|t| t.tool_id == tool_call.tool_id) {
+        tracing::warn!(
+            tenant_id = %req.tenant_id,
+            tool_id = %tool_call.tool_id,
+            "LLM chose a disallowed tool; proposal_rejected"
+        );
+        return (
+            StatusCode::OK,
+            Json(serde_json::json!({ "status": "proposal_rejected", "reason": "disallowed tool" })),
+        )
+            .into_response();
+    }
+
+    // 6. Map ephemeral tool_id → op action and submit through the reconciler.
+    let op_action = state
+        .tool_gating
+        .resolve_internal_fn(&tool_call.tool_id)
+        .unwrap_or(&tool_call.tool_id)
+        .to_owned();
+
+    let snapshot_hash = hash_state(&current_state);
+    let op_id = format!(
+        "ai_op_{}",
+        chrono::Utc::now().timestamp_nanos_opt().unwrap_or(0)
+    );
+
+    let client_msg = ClientMessage {
+        op_id: op_id.clone(),
+        ast_version: req.ast_version.clone(),
+        action: op_action,
+        payload: tool_call.arguments,
+        client_snapshot_hash: snapshot_hash,
+        tenant_id: req.tenant_id.clone(),
+        workflow_id: req.workflow_id.clone(),
+        instance_id: req.instance_id.clone(),
+        client_signature: None,
+        role: "agent".into(),
+        vibe: req.vibe.clone(),
+    };
+
+    let handle = state.actor_registry.get_or_spawn(
+        &client_msg.tenant_id,
+        &client_msg.workflow_id,
+        &client_msg.instance_id,
+    );
+
+    let response = handle
+        .reconcile(client_msg.clone())
+        .await
+        .unwrap_or_else(|| state.reconciler.reconcile(&client_msg));
+
+    match &response {
+        ServerMessage::Accept(a) => {
+            tracing::info!(op_id = %a.op_id, "AI agent proposal accepted");
+        }
+        ServerMessage::Reject(r) => {
+            tracing::info!(
+                op_id = %r.op_id,
+                reason = %r.reason,
+                "AI agent proposal_rejected (dropped)"
+            );
+        }
+    }
+
+    (
+        StatusCode::OK,
+        Json(serde_json::to_value(&response).unwrap_or_default()),
+    )
+        .into_response()
 }

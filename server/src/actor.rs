@@ -48,7 +48,7 @@ const BROADCAST_CAPACITY: usize = 256;
 pub enum ActorMessage {
     /// Process an op and reply on `reply_tx`.
     Reconcile {
-        msg: ClientMessage,
+        msg: Box<ClientMessage>,
         reply_tx: oneshot::Sender<ServerMessage>,
     },
     /// Register a WebSocket subscriber that wants push notifications.
@@ -70,14 +70,22 @@ impl ActorHandle {
     ///
     /// Returns `Err` only if the actor task has terminated (which should not
     /// happen during normal operation).
-    pub async fn send(&self, msg: ActorMessage) -> Result<(), mpsc::error::SendError<ActorMessage>> {
+    pub async fn send(
+        &self,
+        msg: ActorMessage,
+    ) -> Result<(), mpsc::error::SendError<ActorMessage>> {
         self.tx.send(msg).await
     }
 
     /// Reconcile a `ClientMessage` through the actor and wait for the reply.
     pub async fn reconcile(&self, msg: ClientMessage) -> Option<ServerMessage> {
         let (reply_tx, reply_rx) = oneshot::channel();
-        self.send(ActorMessage::Reconcile { msg, reply_tx }).await.ok()?;
+        self.send(ActorMessage::Reconcile {
+            msg: Box::new(msg),
+            reply_tx,
+        })
+        .await
+        .ok()?;
         reply_rx.await.ok()
     }
 }
@@ -143,9 +151,7 @@ impl ActorRegistry {
     }
 
     /// Create a registry with a custom reconciler factory (useful for testing).
-    pub fn with_factory(
-        factory: Arc<dyn Fn() -> Arc<Reconciler> + Send + Sync>,
-    ) -> Self {
+    pub fn with_factory(factory: Arc<dyn Fn() -> Arc<Reconciler> + Send + Sync>) -> Self {
         Self {
             actors: Mutex::new(HashMap::new()),
             reconciler_factory: factory,
