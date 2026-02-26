@@ -34,7 +34,7 @@ use ed25519_dalek::{Signature, VerifyingKey};
 use rand::Rng;
 use std::{
     collections::{HashMap, HashSet},
-    sync::{Arc, Mutex},
+    sync::{Arc, Mutex, RwLock},
     task::{Context, Poll},
     time::{SystemTime, UNIX_EPOCH},
 };
@@ -115,11 +115,23 @@ pub trait PublicKeyStore: Send + Sync {
 }
 
 /// Simple in-memory public key store suitable for tests and dev deployments.
+///
+/// # Deprecation
+///
+/// **Do not use in production.**  Use [`EnvVarKeyProvider`] (populated from a
+/// Kubernetes Secret or AWS Secrets Manager environment injection) or
+/// [`PollingKeyProvider`] (which also supports live key rotation) instead.
+#[deprecated(
+    since = "0.2.0",
+    note = "InMemoryPublicKeyStore is for tests and dev only; \
+            use EnvVarKeyProvider or PollingKeyProvider in production"
+)]
 #[derive(Default)]
 pub struct InMemoryPublicKeyStore {
     keys: Mutex<HashMap<String, VerifyingKey>>,
 }
 
+#[allow(deprecated)]
 impl InMemoryPublicKeyStore {
     pub fn new() -> Self {
         Self::default()
@@ -131,6 +143,7 @@ impl InMemoryPublicKeyStore {
     }
 }
 
+#[allow(deprecated)]
 impl PublicKeyStore for InMemoryPublicKeyStore {
     fn get(&self, client_id: &str) -> Option<VerifyingKey> {
         self.keys.lock().unwrap().get(client_id).copied()
@@ -161,41 +174,111 @@ impl EnvVarKeyProvider {
     /// Returns an empty provider if the env var is not set or if any key
     /// fails to parse (with a warning log per failed entry).
     pub fn from_env() -> Self {
-        let raw = match std::env::var("KEYS_JSON") {
-            Ok(v) => v,
-            Err(_) => {
-                return Self {
-                    keys: HashMap::new(),
-                }
-            }
-        };
-        let map: HashMap<String, String> = match serde_json::from_str(&raw) {
-            Ok(m) => m,
-            Err(e) => {
-                tracing::warn!("KEYS_JSON is not valid JSON: {e}");
-                return Self {
-                    keys: HashMap::new(),
-                };
-            }
-        };
-        let mut keys = HashMap::new();
-        for (client_id, hex_key) in map {
-            match parse_verifying_key(&hex_key) {
-                Ok(vk) => {
-                    keys.insert(client_id, vk);
-                }
-                Err(e) => {
-                    tracing::warn!(client_id = %client_id, "KEYS_JSON: skipping invalid key: {e}");
-                }
-            }
+        Self {
+            keys: load_keys_from_env(),
         }
-        Self { keys }
     }
 }
 
 impl PublicKeyStore for EnvVarKeyProvider {
     fn get(&self, client_id: &str) -> Option<VerifyingKey> {
         self.keys.get(client_id).copied()
+    }
+}
+
+// ── shared key-loading helper ─────────────────────────────────────────────────
+
+/// Load the Ed25519 verifying key map from the `KEYS_JSON` environment
+/// variable.  Returns an empty map when the variable is absent or invalid.
+///
+/// This is the shared loading logic used by both [`EnvVarKeyProvider`] and
+/// [`PollingKeyProvider`].
+fn load_keys_from_env() -> HashMap<String, VerifyingKey> {
+    let raw = match std::env::var("KEYS_JSON") {
+        Ok(v) => v,
+        Err(_) => return HashMap::new(),
+    };
+    let map: HashMap<String, String> = match serde_json::from_str(&raw) {
+        Ok(m) => m,
+        Err(e) => {
+            tracing::warn!("KEYS_JSON is not valid JSON: {e}");
+            return HashMap::new();
+        }
+    };
+    let mut keys = HashMap::new();
+    for (client_id, hex_key) in map {
+        match parse_verifying_key(&hex_key) {
+            Ok(vk) => {
+                keys.insert(client_id, vk);
+            }
+            Err(e) => {
+                tracing::warn!(client_id = %client_id, "KEYS_JSON: skipping invalid key: {e}");
+            }
+        }
+    }
+    keys
+}
+
+// ── PollingKeyProvider ────────────────────────────────────────────────────────
+
+/// A key provider that periodically reloads keys from the `KEYS_JSON`
+/// environment variable to support **key rotation without a server restart**.
+///
+/// At construction time keys are loaded immediately.  A background task then
+/// wakes every `interval` and replaces the in-memory map with a fresh load.
+/// This enables live rotation:
+///
+/// 1. Update the Kubernetes Secret (or AWS Secrets Manager value) that
+///    injects `KEYS_JSON` into the pod environment.
+/// 2. The pod's `/proc/self/environ` or mounted-file watcher reflects the new
+///    value; the next poll picks it up automatically.
+///
+/// For Kubernetes, mount the secret as a file and read it in the reload
+/// callback instead of using `std::env::var` if you prefer inotify-style
+/// updates over polling.
+pub struct PollingKeyProvider {
+    keys: Arc<RwLock<HashMap<String, VerifyingKey>>>,
+}
+
+impl PollingKeyProvider {
+    /// Create a new provider and spawn a background reload task.
+    ///
+    /// `interval` controls how often `KEYS_JSON` is re-read.  A value of
+    /// 60 seconds is a reasonable production default.
+    ///
+    /// **Must be called inside a Tokio runtime.**
+    pub fn new(interval: std::time::Duration) -> Self {
+        let keys = Arc::new(RwLock::new(load_keys_from_env()));
+        let keys_clone = keys.clone();
+        tokio::spawn(async move {
+            loop {
+                tokio::time::sleep(interval).await;
+                let updated = load_keys_from_env();
+                tracing::debug!(count = updated.len(), "PollingKeyProvider: reloaded KEYS_JSON");
+                match keys_clone.write() {
+                    Ok(mut guard) => *guard = updated,
+                    Err(poisoned) => {
+                        // RwLock is poisoned (a previous writer panicked).  Recover by
+                        // overwriting the poisoned data with the fresh snapshot so the
+                        // server keeps serving valid keys rather than crashing.
+                        tracing::error!(
+                            "PollingKeyProvider: RwLock poisoned; recovering with fresh keys"
+                        );
+                        *poisoned.into_inner() = updated;
+                    }
+                }
+            }
+        });
+        Self { keys }
+    }
+}
+
+impl PublicKeyStore for PollingKeyProvider {
+    fn get(&self, client_id: &str) -> Option<VerifyingKey> {
+        self.keys
+            .read()
+            .ok()
+            .and_then(|guard| guard.get(client_id).copied())
     }
 }
 
@@ -444,10 +527,12 @@ pub fn validate_op_id(
 
 #[cfg(test)]
 mod tests {
+    #[allow(deprecated)]
     use super::*;
     use ed25519_dalek::{Signer, SigningKey};
     use rand::rngs::OsRng;
 
+    #[allow(deprecated)]
     fn make_state(keys: &[(&str, VerifyingKey)]) -> OpIdState {
         let store = Arc::new(InMemoryPublicKeyStore::new());
         for (id, key) in keys {

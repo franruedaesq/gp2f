@@ -10,13 +10,14 @@ use std::sync::Arc;
 use tower_http::trace::TraceLayer;
 use tracing_subscriber::{layer::SubscriberExt, util::SubscriberInitExt};
 
+#[allow(deprecated)]
 use gp2f_server::{
     actor::ActorRegistry,
     async_ingestion::AsyncIngestionQueue,
     compat,
     llm_provider::{build_provider, LlmMessage, LlmProvider, LlmRequest},
-    middleware::{EnvVarKeyProvider, InMemoryPublicKeyStore, OpIdLayer, PublicKeyStore},
-    rate_limit::AiRateLimiter,
+    middleware::{EnvVarKeyProvider, InMemoryPublicKeyStore, OpIdLayer, PollingKeyProvider, PublicKeyStore},
+    rate_limit::{build_rate_limiter, DynRateLimiter},
     reconciler::Reconciler,
     redis_broadcast::{build_broadcaster, DynBroadcaster},
     temporal_store::{InMemoryStore, PersistentStore, TemporalStore},
@@ -39,7 +40,7 @@ struct AppState {
     /// Tool gating service – decides which tools the LLM may see.
     tool_gating: Arc<ToolGatingService>,
     /// Per-tenant AI rate limiter and budget guard.
-    ai_rate_limiter: Arc<AiRateLimiter>,
+    ai_rate_limiter: DynRateLimiter,
     /// Async ingestion queue for the `/op/async` low-latency endpoint.
     ingestion_queue: Arc<AsyncIngestionQueue>,
 }
@@ -118,13 +119,26 @@ async fn main() {
     let token_service = build_token_store().await;
 
     // ── Op-ID middleware (ed25519 validation) ─────────────────────────────
-    // Prefer KEYS_JSON (env-var key provider for K8s Secrets / production).
-    // Fall back to an empty in-memory store (dev/unauthenticated mode).
-    let key_store: Arc<dyn PublicKeyStore> = if std::env::var("KEYS_JSON").is_ok() {
+    // Key-provider selection (highest-priority first):
+    //   1. KEYS_POLL_INTERVAL_SECS set → PollingKeyProvider (live key rotation)
+    //   2. KEYS_JSON set               → EnvVarKeyProvider (static, one-shot load)
+    //   3. Neither                     → empty InMemoryPublicKeyStore (dev/test only)
+    const DEFAULT_KEYS_POLL_INTERVAL_SECS: u64 = 60;
+    let key_store: Arc<dyn PublicKeyStore> = if let Ok(interval_str) =
+        std::env::var("KEYS_POLL_INTERVAL_SECS")
+    {
+        let secs: u64 = interval_str.parse().unwrap_or(DEFAULT_KEYS_POLL_INTERVAL_SECS);
+        let interval = std::time::Duration::from_secs(secs);
+        tracing::info!(interval_secs = secs, "Loading public keys via PollingKeyProvider");
+        Arc::new(PollingKeyProvider::new(interval))
+    } else if std::env::var("KEYS_JSON").is_ok() {
         tracing::info!("Loading public keys from KEYS_JSON");
         Arc::new(EnvVarKeyProvider::from_env())
     } else {
-        Arc::new(InMemoryPublicKeyStore::new())
+        #[allow(deprecated)]
+        {
+            Arc::new(InMemoryPublicKeyStore::new())
+        }
     };
     let op_id_layer = OpIdLayer::new(key_store);
 
@@ -177,7 +191,7 @@ async fn main() {
         broadcaster,
         llm_provider,
         tool_gating: Arc::new(ToolGatingService::new()),
-        ai_rate_limiter: Arc::new(AiRateLimiter::new()),
+        ai_rate_limiter: build_rate_limiter().await,
         ingestion_queue: Arc::new(ingestion_queue),
     };
 
@@ -434,11 +448,40 @@ fn guardrail_check(prompt: &str) -> Result<(), &'static str> {
         "forget your instructions",
         "bypass your",
         "override your",
+        // Additional injection / jailbreak patterns
+        "system prompt",
+        "reveal your prompt",
+        "print your instructions",
+        "show me your instructions",
+        "what are your instructions",
+        "do anything now",
+        "dan mode",
+        "jailbreak",
+        "developer mode",
+        "enable developer mode",
+        "sudo mode",
+        "no restrictions",
+        "without restrictions",
+        "ignore ethics",
+        "ignore safety",
+        "disregard ethics",
+        "disregard safety",
     ];
     for pattern in BLOCKED_PATTERNS {
         if lower.contains(pattern) {
             return Err("blocked by guardrail");
         }
+    }
+    // Reject prompts that contain a high density of invisible / control Unicode
+    // code points (e.g. zero-width joiners used in homoglyph / hidden-text attacks).
+    // sanitize_prompt_input already strips these characters; if a significant
+    // fraction of the original input was invisible, treat it as suspicious.
+    let invisible_count = prompt
+        .chars()
+        .filter(|c| is_invisible_unicode(*c))
+        .count();
+    if invisible_count > MAX_INVISIBLE_UNICODE_CHARS {
+        return Err("blocked by guardrail: excessive invisible characters");
     }
     Ok(())
 }
@@ -448,14 +491,58 @@ fn guardrail_check(prompt: &str) -> Result<(), &'static str> {
 /// Maximum length allowed for user-supplied prompts (characters).
 const MAX_PROMPT_LEN: usize = 4_096;
 
+/// Threshold: if more than this many invisible Unicode characters appear in the
+/// raw (pre-sanitized) prompt, treat the input as a potential hidden-text attack
+/// and reject it in the guardrail check.
+const MAX_INVISIBLE_UNICODE_CHARS: usize = 5;
+
+/// Returns `true` for Unicode code points that are invisible / zero-width and
+/// commonly used in homoglyph or hidden-text injection attacks.
+fn is_invisible_unicode(c: char) -> bool {
+    matches!(
+        c,
+        // Zero-width and soft-hyphen characters
+        '\u{00AD}' // SOFT HYPHEN
+        | '\u{200B}' // ZERO WIDTH SPACE
+        | '\u{200C}' // ZERO WIDTH NON-JOINER
+        | '\u{200D}' // ZERO WIDTH JOINER
+        | '\u{200E}' // LEFT-TO-RIGHT MARK
+        | '\u{200F}' // RIGHT-TO-LEFT MARK
+        | '\u{202A}' // LEFT-TO-RIGHT EMBEDDING
+        | '\u{202B}' // RIGHT-TO-LEFT EMBEDDING
+        | '\u{202C}' // POP DIRECTIONAL FORMATTING
+        | '\u{202D}' // LEFT-TO-RIGHT OVERRIDE
+        | '\u{202E}' // RIGHT-TO-LEFT OVERRIDE
+        | '\u{2060}' // WORD JOINER
+        | '\u{2061}' // FUNCTION APPLICATION
+        | '\u{2062}' // INVISIBLE TIMES
+        | '\u{2063}' // INVISIBLE SEPARATOR
+        | '\u{2064}' // INVISIBLE PLUS
+        | '\u{206A}'..='\u{206F}' // Deprecated format characters
+        | '\u{FEFF}' // ZERO WIDTH NO-BREAK SPACE (BOM)
+        | '\u{FFF9}'..='\u{FFFB}' // Interlinear annotation characters
+    )
+}
+
 /// Sanitize a user-supplied prompt before it is inserted into an LLM template.
 ///
 /// - Strips ASCII control characters (except `\t` and `\n`) that could be used
 ///   to inject hidden instructions or escape structured prompts.
+/// - Strips invisible Unicode code points (zero-width spaces, directional
+///   overrides, soft hyphens, BOM, etc.) used in homoglyph / hidden-text
+///   attacks.
 /// - Trims the result and enforces a maximum length to prevent token stuffing.
 fn sanitize_prompt_input(input: &str) -> String {
     fn is_allowed_char(c: char) -> bool {
-        !c.is_control() || c == '\t' || c == '\n'
+        // Strip ASCII control characters (except tab and newline).
+        if c.is_control() && c != '\t' && c != '\n' {
+            return false;
+        }
+        // Strip invisible Unicode code points.
+        if is_invisible_unicode(c) {
+            return false;
+        }
+        true
     }
     let sanitized: String = input.chars().filter(|&c| is_allowed_char(c)).collect();
     sanitized.trim().chars().take(MAX_PROMPT_LEN).collect()
@@ -478,7 +565,7 @@ async fn agent_propose_handler(
     Json(req): Json<AgentProposeRequest>,
 ) -> impl IntoResponse {
     // 1. Rate-limit / budget check.
-    if let Err(e) = state.ai_rate_limiter.check_and_consume(&req.tenant_id) {
+    if let Err(e) = state.ai_rate_limiter.check_and_consume(&req.tenant_id).await {
         tracing::warn!(
             tenant_id = %req.tenant_id,
             error = %e,

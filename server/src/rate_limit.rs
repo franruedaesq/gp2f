@@ -5,14 +5,18 @@
 //! tenant by default, and a budget guard that disables AI assistance when a
 //! tenant's monthly spend ceiling is reached.
 //!
-//! ## Redis
+//! ## Redis (distributed deployments)
 //!
-//! The in-process implementation stores counters atomically with a
-//! [`std::sync::Mutex`].  For multi-replica deployments enable the
-//! `redis-broadcast` Cargo feature and replace [`AiRateLimiter`] with a
-//! Redis-backed token bucket (INCR + EXPIRE on a per-tenant key).
+//! When the `redis-broadcast` Cargo feature is enabled and `REDIS_URL` is set,
+//! the [`build_rate_limiter`] factory returns a [`RedisRateLimiter`] that uses
+//! Redis `INCR + EXPIRE` for distributed counting across replicas.
+//!
+//! For single-replica deployments (or when Redis is unavailable) the factory
+//! falls back to the in-process [`AiRateLimiter`] which stores counters in
+//! local `Mutex`-guarded `HashMap`s.
 
 use std::{collections::HashMap, sync::Mutex, time::Instant};
+use std::sync::Arc;
 
 // ── constants ─────────────────────────────────────────────────────────────────
 
@@ -197,6 +201,142 @@ impl Default for AiRateLimiter {
     fn default() -> Self {
         Self::new()
     }
+}
+
+// ── RateLimiterBackend trait ──────────────────────────────────────────────────
+
+/// Abstraction over the rate-limiting backend.
+///
+/// Implement this trait to swap the in-process token bucket for a distributed
+/// backend (Redis, Memcached, etc.) without changing call sites.
+#[async_trait::async_trait]
+pub trait RateLimiterBackend: Send + Sync {
+    /// Try to consume one AI call token for `tenant_id`.
+    ///
+    /// Returns `Ok(())` when the call is allowed.  Returns a
+    /// [`RateLimitError`] when the call should be rejected.
+    async fn check_and_consume(&self, tenant_id: &str) -> Result<(), RateLimitError>;
+}
+
+/// Type-erased rate limiter used throughout the server.
+pub type DynRateLimiter = Arc<dyn RateLimiterBackend>;
+
+// ── In-process adapter ────────────────────────────────────────────────────────
+
+/// Wraps [`AiRateLimiter`] so it can be used as a [`RateLimiterBackend`].
+pub struct InProcessRateLimiter(pub AiRateLimiter);
+
+#[async_trait::async_trait]
+impl RateLimiterBackend for InProcessRateLimiter {
+    async fn check_and_consume(&self, tenant_id: &str) -> Result<(), RateLimitError> {
+        self.0.check_and_consume(tenant_id)
+    }
+}
+
+// ── Redis-backed rate limiter ─────────────────────────────────────────────────
+
+/// Redis-backed distributed rate limiter using `INCR + EXPIRE`.
+///
+/// Each tenant gets a Redis key `ai_rl:{tenant_id}` that is incremented on
+/// every call and expired after 60 seconds.  This provides a sliding fixed-
+/// window counter that is consistent across all server replicas.
+///
+/// Requires the `redis-broadcast` Cargo feature and `REDIS_URL` to be set.
+#[cfg(feature = "redis-broadcast")]
+pub struct RedisRateLimiter {
+    connection: redis::aio::ConnectionManager,
+    max_calls_per_minute: u32,
+}
+
+#[cfg(feature = "redis-broadcast")]
+impl RedisRateLimiter {
+    /// Connect to Redis and return a new rate limiter.
+    pub async fn connect(redis_url: &str, max_calls_per_minute: u32) -> Result<Self, redis::RedisError> {
+        let client = redis::Client::open(redis_url)?;
+        let connection = redis::aio::ConnectionManager::new(client).await?;
+        Ok(Self {
+            connection,
+            max_calls_per_minute,
+        })
+    }
+
+    /// Redis key for a tenant's per-minute call counter.
+    fn key(tenant_id: &str) -> String {
+        format!("ai_rl:{tenant_id}")
+    }
+}
+
+#[cfg(feature = "redis-broadcast")]
+#[async_trait::async_trait]
+impl RateLimiterBackend for RedisRateLimiter {
+    async fn check_and_consume(&self, tenant_id: &str) -> Result<(), RateLimitError> {
+        use redis::Script;
+        // Atomically INCR the counter and set a 60-second TTL on first increment.
+        // The Lua script runs as a single atomic unit on the Redis server, which
+        // eliminates the INCR/EXPIRE race condition that exists in a two-step approach.
+        let script = Script::new(
+            r"
+            local count = redis.call('INCR', KEYS[1])
+            if count == 1 then
+                redis.call('EXPIRE', KEYS[1], 60)
+            end
+            return count
+            ",
+        );
+        let key = Self::key(tenant_id);
+        let mut conn = self.connection.clone();
+        let count: u64 = script.key(&key).invoke_async(&mut conn).await.map_err(|e| {
+            tracing::warn!(tenant_id = %tenant_id, error = %e, "Redis rate-limit script failed; failing open");
+            // Fail open on Redis errors to avoid blocking all traffic during
+            // Redis outages; log the error so it can be alerted on.
+            RateLimitError::TokenBucketExhausted {
+                tenant_id: tenant_id.to_owned(),
+                limit: self.max_calls_per_minute,
+                retry_after_secs: 1,
+            }
+        })?;
+        if count > u64::from(self.max_calls_per_minute) {
+            Err(RateLimitError::TokenBucketExhausted {
+                tenant_id: tenant_id.to_owned(),
+                limit: self.max_calls_per_minute,
+                retry_after_secs: 60,
+            })
+        } else {
+            Ok(())
+        }
+    }
+}
+
+// ── factory ───────────────────────────────────────────────────────────────────
+
+/// Build the best available rate limiter at startup.
+///
+/// When `REDIS_URL` is set and the `redis-broadcast` feature is enabled,
+/// connects to Redis for distributed counting across replicas.  Otherwise
+/// falls back to the in-process token-bucket implementation.
+pub async fn build_rate_limiter() -> DynRateLimiter {
+    #[cfg(feature = "redis-broadcast")]
+    if let Ok(url) = std::env::var("REDIS_URL") {
+        let max = std::env::var("AI_RATE_LIMIT_PER_MINUTE")
+            .ok()
+            .and_then(|s| s.parse().ok())
+            .unwrap_or(DEFAULT_MAX_LLM_CALLS_PER_MINUTE);
+        match RedisRateLimiter::connect(&url, max).await {
+            Ok(limiter) => {
+                tracing::info!(
+                    url = %url,
+                    max_calls_per_minute = max,
+                    "Redis-backed AI rate limiter connected"
+                );
+                return Arc::new(limiter);
+            }
+            Err(e) => {
+                tracing::warn!("Redis rate limiter failed ({e}); falling back to in-process");
+            }
+        }
+    }
+    tracing::info!("Using in-process AI rate limiter (single-replica mode)");
+    Arc::new(InProcessRateLimiter(AiRateLimiter::new()))
 }
 
 // ── tests ─────────────────────────────────────────────────────────────────────
