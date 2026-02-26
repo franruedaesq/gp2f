@@ -1,0 +1,126 @@
+{{/*
+Phase 4.1 – Isolated Temporal Postgres StatefulSet.
+
+Deploys a dedicated Postgres 16 instance for Temporal workflow history.
+This keeps Temporal's high-write event-sourcing tables entirely separate
+from the application's business-data tables, preventing I/O contention.
+
+Set `temporal.postgres.enabled: false` to use an external managed Postgres
+(e.g. AWS RDS, Cloud SQL) and supply the connection string via a Secret.
+*/}}
+{{- if .Values.temporal.postgres.enabled }}
+---
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: {{ include "gp2f.fullname" . }}-temporal-postgres-config
+  labels:
+    {{- include "gp2f.labels" . | nindent 4 }}
+    app.kubernetes.io/component: temporal-postgres
+data:
+  postgresql.conf: |
+    # Phase 4.2 – WAL and autovacuum tuning for Temporal event-sourcing workloads.
+    max_wal_size = '{{ .Values.temporal.postgres.config.max_wal_size }}'
+    min_wal_size = '{{ .Values.temporal.postgres.config.min_wal_size }}'
+    wal_compression = {{ .Values.temporal.postgres.config.wal_compression }}
+    wal_level = {{ .Values.temporal.postgres.config.wal_level }}
+    checkpoint_completion_target = {{ .Values.temporal.postgres.config.checkpoint_completion_target }}
+    autovacuum_vacuum_cost_delay = '{{ .Values.temporal.postgres.config.autovacuum_vacuum_cost_delay }}'
+    autovacuum_vacuum_scale_factor = {{ .Values.temporal.postgres.config.autovacuum_vacuum_scale_factor }}
+    autovacuum_analyze_scale_factor = {{ .Values.temporal.postgres.config.autovacuum_analyze_scale_factor }}
+    autovacuum_max_workers = {{ .Values.temporal.postgres.config.autovacuum_max_workers }}
+    shared_buffers = '{{ .Values.temporal.postgres.config.shared_buffers }}'
+    effective_cache_size = '{{ .Values.temporal.postgres.config.effective_cache_size }}'
+    work_mem = '{{ .Values.temporal.postgres.config.work_mem }}'
+    maintenance_work_mem = '{{ .Values.temporal.postgres.config.maintenance_work_mem }}'
+---
+apiVersion: apps/v1
+kind: StatefulSet
+metadata:
+  name: {{ include "gp2f.fullname" . }}-temporal-postgres
+  labels:
+    {{- include "gp2f.labels" . | nindent 4 }}
+    app.kubernetes.io/component: temporal-postgres
+spec:
+  serviceName: {{ include "gp2f.fullname" . }}-temporal-postgres
+  replicas: 1
+  selector:
+    matchLabels:
+      {{- include "gp2f.selectorLabels" . | nindent 6 }}
+      app.kubernetes.io/component: temporal-postgres
+  template:
+    metadata:
+      labels:
+        {{- include "gp2f.selectorLabels" . | nindent 8 }}
+        app.kubernetes.io/component: temporal-postgres
+    spec:
+      containers:
+        - name: postgres
+          image: {{ .Values.temporal.postgres.image }}
+          ports:
+            - containerPort: 5432
+              name: postgres
+          env:
+            - name: POSTGRES_DB
+              value: temporal
+            - name: POSTGRES_USER
+              valueFrom:
+                secretKeyRef:
+                  name: {{ include "gp2f.fullname" . }}-temporal-postgres-secret
+                  key: username
+            - name: POSTGRES_PASSWORD
+              valueFrom:
+                secretKeyRef:
+                  name: {{ include "gp2f.fullname" . }}-temporal-postgres-secret
+                  key: password
+          volumeMounts:
+            - name: data
+              mountPath: /var/lib/postgresql/data
+            - name: config
+              mountPath: /etc/postgresql/postgresql.conf
+              subPath: postgresql.conf
+          resources:
+            {{- toYaml .Values.temporal.postgres.resources | nindent 12 }}
+          readinessProbe:
+            exec:
+              command: ["pg_isready", "-U", "postgres"]
+            initialDelaySeconds: 10
+            periodSeconds: 10
+          livenessProbe:
+            exec:
+              command: ["pg_isready", "-U", "postgres"]
+            initialDelaySeconds: 30
+            periodSeconds: 30
+      volumes:
+        - name: config
+          configMap:
+            name: {{ include "gp2f.fullname" . }}-temporal-postgres-config
+  volumeClaimTemplates:
+    - metadata:
+        name: data
+      spec:
+        accessModes: ["ReadWriteOnce"]
+        {{- if .Values.temporal.postgres.storageClass }}
+        storageClassName: {{ .Values.temporal.postgres.storageClass }}
+        {{- end }}
+        resources:
+          requests:
+            storage: {{ .Values.temporal.postgres.storageSize }}
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: {{ include "gp2f.fullname" . }}-temporal-postgres
+  labels:
+    {{- include "gp2f.labels" . | nindent 4 }}
+    app.kubernetes.io/component: temporal-postgres
+spec:
+  selector:
+    {{- include "gp2f.selectorLabels" . | nindent 4 }}
+    app.kubernetes.io/component: temporal-postgres
+  ports:
+    - port: 5432
+      targetPort: 5432
+      name: postgres
+  clusterIP: None
+{{- end }}

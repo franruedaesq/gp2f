@@ -186,11 +186,13 @@ pub fn medical_triage_intake() -> WorkflowDefinition {
                 name: "register_patient".into(),
                 policy: role_in(&["clinician", "admin"]),
                 compensation_ref: Some("undo_register_patient".into()),
+                is_local: false,
             },
             ActivityDef {
                 name: "collect_vitals".into(),
                 policy: and(role_equals("clinician"), field_is_true("/consent_given")),
                 compensation_ref: Some("undo_collect_vitals".into()),
+                is_local: false,
             },
             ActivityDef {
                 name: "assign_triage_level".into(),
@@ -199,19 +201,21 @@ pub fn medical_triage_intake() -> WorkflowDefinition {
                     field_is_true("/vitals_recorded"),
                 ),
                 compensation_ref: Some("undo_assign_triage_level".into()),
+                is_local: false,
             },
             ActivityDef {
                 name: "finalize_intake".into(),
                 policy: role_equals("admin"),
                 compensation_ref: Some("undo_finalize_intake".into()),
+                is_local: false,
             },
         ],
         compensation_handlers,
         access_policy: Some(role_in(&["clinician", "admin"])),
+        workflow_version: 1,
+        task_queue: "gp2f-queue-v1".into(),
     }
 }
-
-// ── 2. Supply-Chain Offline Delivery Update ───────────────────────────────────
 
 /// Build the **Supply-Chain Offline Delivery Update** workflow.
 ///
@@ -254,11 +258,13 @@ pub fn supply_chain_delivery_update() -> WorkflowDefinition {
                 name: "scan_package".into(),
                 policy: role_in(&["driver", "dispatcher"]),
                 compensation_ref: Some("undo_scan_package".into()),
+                is_local: false,
             },
             ActivityDef {
                 name: "confirm_delivery_location".into(),
                 policy: and(role_equals("driver"), field_is_true("/gps_signed")),
                 compensation_ref: Some("undo_confirm_delivery_location".into()),
+                is_local: false,
             },
             ActivityDef {
                 name: "record_proof_of_delivery".into(),
@@ -267,6 +273,7 @@ pub fn supply_chain_delivery_update() -> WorkflowDefinition {
                     field_is_true("/delivery_location_confirmed"),
                 ),
                 compensation_ref: None,
+                is_local: false,
             },
             ActivityDef {
                 name: "close_delivery".into(),
@@ -275,10 +282,13 @@ pub fn supply_chain_delivery_update() -> WorkflowDefinition {
                     field_is_true("/proof_of_delivery_recorded"),
                 ),
                 compensation_ref: None,
+                is_local: false,
             },
         ],
         compensation_handlers,
         access_policy: Some(role_in(&["driver", "dispatcher"])),
+        workflow_version: 1,
+        task_queue: "gp2f-queue-v1".into(),
     }
 }
 
@@ -334,11 +344,13 @@ pub fn multi_party_contract_negotiation() -> WorkflowDefinition {
                 name: "legal_review".into(),
                 policy: and(role_equals("legal"), field_is_true("/draft_uploaded")),
                 compensation_ref: Some("undo_legal_review".into()),
+                is_local: false,
             },
             ActivityDef {
                 name: "finance_review".into(),
                 policy: and(role_equals("finance"), field_is_true("/legal_signed_off")),
                 compensation_ref: Some("undo_finance_review".into()),
+                is_local: false,
             },
             ActivityDef {
                 name: "executive_approval".into(),
@@ -347,6 +359,7 @@ pub fn multi_party_contract_negotiation() -> WorkflowDefinition {
                     field_is_true("/finance_signed_off"),
                 ),
                 compensation_ref: Some("undo_executive_approval".into()),
+                is_local: false,
             },
             ActivityDef {
                 name: "countersign".into(),
@@ -355,10 +368,13 @@ pub fn multi_party_contract_negotiation() -> WorkflowDefinition {
                     field_is_true("/executive_approved"),
                 ),
                 compensation_ref: None,
+                is_local: false,
             },
         ],
         compensation_handlers,
         access_policy: Some(role_in(&["legal", "finance", "executive", "signatory"])),
+        workflow_version: 1,
+        task_queue: "gp2f-queue-v1".into(),
     }
 }
 
