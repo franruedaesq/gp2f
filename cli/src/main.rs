@@ -2,7 +2,12 @@ use clap::{Parser, Subcommand};
 use policy_core::{AstNode, Evaluator, VersionPolicy};
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
-use std::{fs, path::PathBuf, process, time::{SystemTime, UNIX_EPOCH}};
+use std::{
+    fs,
+    path::PathBuf,
+    process,
+    time::{SystemTime, UNIX_EPOCH},
+};
 
 #[derive(Parser)]
 #[command(

@@ -85,9 +85,7 @@ impl ClientMessage {
             ));
         }
         if self.action.len() > MAX_LABEL_LEN {
-            return Err(format!(
-                "action exceeds maximum length of {MAX_LABEL_LEN}"
-            ));
+            return Err(format!("action exceeds maximum length of {MAX_LABEL_LEN}"));
         }
         if self.tenant_id.len() > MAX_ID_LEN {
             return Err(format!("tenant_id exceeds maximum length of {MAX_ID_LEN}"));

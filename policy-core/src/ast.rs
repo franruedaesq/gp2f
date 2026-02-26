@@ -1,10 +1,6 @@
 // In no_std + alloc mode, bring heap types into scope.
 #[cfg(not(feature = "std"))]
-use alloc::{
-    string::String,
-    vec,
-    vec::Vec,
-};
+use alloc::{string::String, vec, vec::Vec};
 
 use serde::{Deserialize, Serialize};
 

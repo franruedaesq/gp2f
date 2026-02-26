@@ -121,7 +121,10 @@ impl RbacRegistry {
                         let refs: Vec<&str> = perms.iter().map(String::as_str).collect();
                         registry.define(role, &refs);
                     }
-                    tracing::info!(roles = map.len(), "RBAC registry loaded from RBAC_CONFIG_JSON");
+                    tracing::info!(
+                        roles = map.len(),
+                        "RBAC registry loaded from RBAC_CONFIG_JSON"
+                    );
                     return registry;
                 }
                 Err(e) => {
