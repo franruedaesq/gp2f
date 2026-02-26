@@ -203,7 +203,7 @@ impl ReplayStore for std::sync::Mutex<ReplayGuard> {
 /// connects to Redis; otherwise falls back to the in-process replay guard.
 pub async fn build_replay_store() -> DynReplayStore {
     #[cfg(feature = "redis-broadcast")]
-    if let Ok(url) = std::env::var("REDIS_URL") {
+    if let Some(url) = crate::secrets::resolve_secret("REDIS_URL") {
         match RedisReplayGuard::connect(&url) {
             Ok(guard) => {
                 tracing::info!(url = %url, "Redis replay protection connected");

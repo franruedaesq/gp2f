@@ -9,7 +9,7 @@ description = "Isomorphic AST policy evaluator for GP2F"
 [features]
 # Enable the Rust standard library (default). Disable only when targeting
 # bare-metal / WASM environments that cannot link against std.
-default = ["std"]
+default = []
 std = [
     "serde/std",
     "serde_json/std",

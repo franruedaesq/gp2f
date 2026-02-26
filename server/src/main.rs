@@ -121,8 +121,9 @@ async fn main() {
     // ── Op-ID middleware (ed25519 validation) ─────────────────────────────
     // Key-provider selection (highest-priority first):
     //   1. KEYS_POLL_INTERVAL_SECS set → PollingKeyProvider (live key rotation)
-    //   2. KEYS_JSON set               → EnvVarKeyProvider (static, one-shot load)
-    //   3. Neither                     → empty InMemoryPublicKeyStore (dev/test only)
+    //   2. KEYS_JSON set (or KEYS_JSON_FILE)
+    //                              → EnvVarKeyProvider (static, one-shot load)
+    //   3. Neither                 → empty InMemoryPublicKeyStore (dev/test only)
     const DEFAULT_KEYS_POLL_INTERVAL_SECS: u64 = 60;
     let key_store: Arc<dyn PublicKeyStore> = if let Ok(interval_str) =
         std::env::var("KEYS_POLL_INTERVAL_SECS")
@@ -131,7 +132,7 @@ async fn main() {
         let interval = std::time::Duration::from_secs(secs);
         tracing::info!(interval_secs = secs, "Loading public keys via PollingKeyProvider");
         Arc::new(PollingKeyProvider::new(interval))
-    } else if std::env::var("KEYS_JSON").is_ok() {
+    } else if gp2f_server::secrets::resolve_secret("KEYS_JSON").is_some() {
         tracing::info!("Loading public keys from KEYS_JSON");
         Arc::new(EnvVarKeyProvider::from_env())
     } else {

@@ -316,7 +316,7 @@ impl RateLimiterBackend for RedisRateLimiter {
 /// falls back to the in-process token-bucket implementation.
 pub async fn build_rate_limiter() -> DynRateLimiter {
     #[cfg(feature = "redis-broadcast")]
-    if let Ok(url) = std::env::var("REDIS_URL") {
+    if let Some(url) = crate::secrets::resolve_secret("REDIS_URL") {
         let max = std::env::var("AI_RATE_LIMIT_PER_MINUTE")
             .ok()
             .and_then(|s| s.parse().ok())

@@ -13,7 +13,7 @@ name = "gp2f_node"
 [dependencies]
 napi = { version = "2", default-features = false, features = ["napi8", "async", "tokio_rt", "serde-json"] }
 napi-derive = "2"
-policy-core = { path = "../policy-core" }
+policy-core = { path = "../policy-core", features = ["std"] }
 serde.workspace = true
 serde_json.workspace = true
 thiserror.workspace = true

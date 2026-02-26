@@ -366,7 +366,7 @@ impl TokenStore for TokenService {
 /// connects to Redis; otherwise falls back to the in-process token service.
 pub async fn build_token_store() -> DynTokenStore {
     #[cfg(feature = "redis-broadcast")]
-    if let Ok(url) = std::env::var("REDIS_URL") {
+    if let Some(url) = crate::secrets::resolve_secret("REDIS_URL") {
         match RedisTokenStore::connect(&url) {
             Ok(store) => {
                 tracing::info!(url = %url, "Redis token store connected");

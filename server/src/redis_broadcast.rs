@@ -196,7 +196,7 @@ pub type DynBroadcaster = Arc<dyn BroadcastBackend>;
 /// connects to Redis; otherwise falls back to the in-process broadcaster.
 pub async fn build_broadcaster() -> DynBroadcaster {
     #[cfg(feature = "redis-broadcast")]
-    if let Ok(url) = std::env::var("REDIS_URL") {
+    if let Some(url) = crate::secrets::resolve_secret("REDIS_URL") {
         match RedisBroadcaster::connect(&url).await {
             Ok(b) => {
                 tracing::info!(url = %url, "Redis PubSub broadcaster connected");

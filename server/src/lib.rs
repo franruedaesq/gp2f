@@ -20,6 +20,7 @@ pub mod reconciler;
 pub mod redis_broadcast;
 pub mod replay_protection;
 pub mod replay_testing;
+pub mod secrets;
 pub mod signature;
 pub mod temporal_store;
 pub mod token_service;
