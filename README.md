@@ -1,8 +1,9 @@
 # GP2F – Generic Policy & Prediction Framework
 
 [![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](LICENSE)
-[![Rust](https://img.shields.io/badge/rust-1.75%2B-orange.svg)](https://www.rust-lang.org/)
+[![Rust](https://img.shields.io/badge/rust-1.78%2B-orange.svg)](https://www.rust-lang.org/)
 [![Version](https://img.shields.io/badge/version-0.1.0-blue.svg)](Cargo.toml)
+[![npm](https://img.shields.io/badge/npm-%40gp2f%2Fserver-red.svg)](gp2f-node/package.json)
 
 GP2F is a **deterministic, local-first framework** that decouples business rules (expressed as versioned JSON ASTs) from routing and UI state. It enables zero-latency optimistic UIs, safe AI participation, conflict-free multi-user collaboration, and enterprise-grade auditability.
 
@@ -18,9 +19,10 @@ GP2F is a **deterministic, local-first framework** that decouples business rules
 6. [CLI Usage](#cli-usage)
 7. [Server Usage](#server-usage)
 8. [TypeScript Client SDK](#typescript-client-sdk)
-9. [Policy AST Reference](#policy-ast-reference)
-10. [Configuration](#configuration)
-11. [Repository Structure](#repository-structure)
+9. [Node.js Native Bindings](#nodejs-native-bindings)
+10. [Policy AST Reference](#policy-ast-reference)
+11. [Configuration](#configuration)
+12. [Repository Structure](#repository-structure)
 
 ---
 
@@ -117,7 +119,7 @@ Client predicts locally (WASM)
 
 ### Prerequisites
 
-- **Rust ≥ 1.75** – [install rustup](https://rustup.rs/)
+- **Rust ≥ 1.78** – [install rustup](https://rustup.rs/)
 - **Node.js ≥ 18** – for the TypeScript client SDK
 
 ### Clone
@@ -341,6 +343,83 @@ import { UndoButton, ReconciliationBanner, MergeModal } from '@gp2f/client-sdk/r
 
 ---
 
+## Node.js Native Bindings
+
+The `gp2f-node` package (`@gp2f/server`) provides **native Node.js bindings** for the GP2F policy engine via [napi-rs](https://napi.rs/). No WASM, no child processes — the Rust evaluator runs directly inside Node.js as a native addon.
+
+### Prerequisites
+
+- **Node.js ≥ 16**
+- **Rust ≥ 1.78** (to build from source)
+
+### Install
+
+```bash
+cd gp2f-node
+npm install
+```
+
+### Evaluate a policy
+
+```typescript
+import { evaluate, evaluateWithTrace } from '@gp2f/server';
+
+// Simple boolean result
+const allowed = evaluate(
+  { kind: 'Field', path: '/role', value: 'admin' },
+  { role: 'admin' }
+);
+// => true
+
+// Full result with evaluation trace
+const { result, trace } = evaluateWithTrace(
+  { kind: 'LiteralTrue' },
+  {}
+);
+// => { result: true, trace: ['[0] LiteralTrue => true'] }
+```
+
+### Define and run a workflow
+
+```typescript
+import { Workflow, GP2FServer } from '@gp2f/server';
+
+const wf = new Workflow('document-approval');
+
+wf.addActivity(
+  'review',
+  {
+    policy: {
+      kind: 'Field',
+      path: '/role',
+      value: 'reviewer',
+    },
+  },
+  async (ctx) => {
+    console.log(`Executing ${ctx.activityName} for tenant ${ctx.tenantId}`);
+  }
+);
+
+const server = new GP2FServer({ port: 3000 });
+server.register(wf);
+await server.start();
+// Listening on http://127.0.0.1:3000
+// POST /workflow/run  – execute next activity
+// POST /workflow/dry-run – evaluate policies without side-effects
+// GET  /health        – health check
+```
+
+### Dry-run (policy check without side-effects)
+
+```typescript
+const permitted = wf.dryRun({ role: 'reviewer' });
+// => true
+```
+
+See [`gp2f-node/index.d.ts`](gp2f-node/index.d.ts) for the full TypeScript API reference and [`docs/sdk-reference/nodejs-bindings.md`](docs/sdk-reference/nodejs-bindings.md) for detailed documentation.
+
+---
+
 ## Policy AST Reference
 
 Policies are JSON documents that form a tree of `AstNode` objects.
@@ -448,6 +527,13 @@ gp2f/
 │       ├── token_service.rs  # Ephemeral AI agent tokens
 │       ├── pilot_workflows.rs# Built-in workflow definitions
 │       └── workflow.rs       # WorkflowDefinition + WorkflowInstance
+├── gp2f-node/          # Native Node.js bindings (@gp2f/server) via napi-rs
+│   ├── src/
+│   │   ├── policy.rs   # evaluate / evaluateWithTrace bindings
+│   │   ├── workflow.rs # Workflow class bindings
+│   │   └── server.rs   # GP2FServer class bindings
+│   ├── index.d.ts      # TypeScript declarations (auto-generated)
+│   └── __test__/       # Jest contract + integration tests
 ├── cli/                # gp2f eval / replay CLI
 ├── client-sdk/         # TypeScript npm package
 └── docs/               # Architecture, wire protocol, SDK onboarding
