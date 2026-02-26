@@ -2,6 +2,11 @@ import type { ClientMessage, ServerMessage } from "./wire";
 
 export type MessageHandler = (msg: ServerMessage) => void;
 export type ErrorHandler = (err: Event) => void;
+/**
+ * Called for each incremental text token received from the server during a
+ * streaming AI response.  The `done` flag is `true` on the final token.
+ */
+export type TokenHandler = (token: string, done: boolean) => void;
 
 export interface Gp2fClientOptions {
   url: string;
@@ -13,6 +18,11 @@ export interface Gp2fClientOptions {
   onOpen?: () => void;
   /** Called when the connection is closed. */
   onClose?: () => void;
+  /**
+   * Called with each incremental text token during a streaming AI response.
+   * Enables token-by-token UI updates ("Time to First Token" UX pattern).
+   */
+  onToken?: TokenHandler;
   /**
    * Token-bucket capacity: maximum number of ops that may be sent in a burst.
    * Defaults to 10.
@@ -28,6 +38,89 @@ export interface Gp2fClientOptions {
    * Defaults to 500 ms ("Settle Duration").
    */
   conflictSettleMs?: number;
+}
+
+// ── Optimistic UI ─────────────────────────────────────────────────────────────
+
+/**
+ * Options for {@link applyOptimisticUpdate}.
+ */
+export interface OptimisticUpdateOptions {
+  /** The DOM element in which to render the loading indicator. */
+  container: HTMLElement;
+  /**
+   * Vibe engine confidence in [0, 1].  When ≥ 0.7 a full skeleton loader is
+   * shown; below that threshold a lighter "Thinking…" text badge is used.
+   * Defaults to 0 (text badge).
+   */
+  confidence?: number;
+  /**
+   * Override the default "Thinking…" label shown in low-confidence mode.
+   */
+  thinkingText?: string;
+}
+
+/**
+ * Show an optimistic UI loading indicator while waiting for an LLM response.
+ *
+ * Renders a skeleton loader (high-confidence path) or a "Thinking…" badge
+ * (low-confidence path) inside `container`, then returns a cleanup function
+ * that removes the indicator when the response arrives.
+ *
+ * @example
+ * ```ts
+ * const cleanup = applyOptimisticUpdate({ container: myDiv, confidence: 0.9 });
+ * const response = await fetchAiSuggestion();
+ * cleanup();
+ * renderResponse(response);
+ * ```
+ */
+export function applyOptimisticUpdate(options: OptimisticUpdateOptions): () => void {
+  const { container, confidence = 0, thinkingText = "Thinking\u2026" } = options;
+
+  const indicator = document.createElement("div");
+  indicator.setAttribute("aria-live", "polite");
+  indicator.setAttribute("aria-label", thinkingText);
+
+  if (confidence >= 0.7) {
+    // High-confidence: render a skeleton loader so the layout shift is minimal.
+    indicator.setAttribute("data-gp2f-skeleton", "true");
+    indicator.style.cssText = [
+      "display:block",
+      "background:linear-gradient(90deg,#e0e0e0 25%,#f5f5f5 50%,#e0e0e0 75%)",
+      "background-size:200% 100%",
+      "animation:gp2f-shimmer 1.4s infinite",
+      "border-radius:4px",
+      "height:1.2em",
+      "width:80%",
+      "margin:4px 0",
+    ].join(";");
+  } else {
+    // Low-confidence: show a simple "Thinking…" text badge.
+    indicator.setAttribute("data-gp2f-thinking", "true");
+    indicator.textContent = thinkingText;
+    indicator.style.cssText = "opacity:0.6;font-style:italic;font-size:0.9em";
+  }
+
+  // Inject the shimmer keyframes once per document.
+  if (
+    typeof document !== "undefined" &&
+    !document.getElementById("gp2f-shimmer-style")
+  ) {
+    const style = document.createElement("style");
+    style.id = "gp2f-shimmer-style";
+    style.textContent =
+      "@keyframes gp2f-shimmer{0%{background-position:200% 0}100%{background-position:-200% 0}}";
+    document.head.appendChild(style);
+  }
+
+  container.appendChild(indicator);
+
+  return () => {
+    if (indicator.parentNode === container) {
+      container.removeChild(indicator);
+    }
+  };
 }
 
 // ── Token Bucket ──────────────────────────────────────────────────────────────
@@ -124,6 +217,22 @@ export class Gp2fClient {
     });
     ws.addEventListener("error", (e) => this.options.onError?.(e));
     ws.addEventListener("message", (e: MessageEvent<string>) => {
+      // ── Streaming token path ───────────────────────────────────────────
+      // The server may send incremental token frames before the final JSON
+      // message to enable token-by-token UI updates (Time to First Token).
+      // Streaming frames are plain-text lines of the form:
+      //   data: <token>\n   (SSE-style, done=false)
+      //   data: [DONE]\n    (final frame, done=true)
+      if (this.options.onToken && e.data.startsWith("data: ")) {
+        const payload = e.data.slice(6).trim();
+        if (payload === "[DONE]") {
+          this.options.onToken("", true);
+        } else {
+          this.options.onToken(payload, false);
+        }
+        return;
+      }
+
       try {
         const msg = JSON.parse(e.data) as ServerMessage;
         this.handleInbound(msg);

@@ -10,8 +10,8 @@ export type {
 } from "./wire";
 
 // WebSocket client
-export { Gp2fClient } from "./client";
-export type { Gp2fClientOptions, MessageHandler, ErrorHandler } from "./client";
+export { Gp2fClient, applyOptimisticUpdate } from "./client";
+export type { Gp2fClientOptions, MessageHandler, ErrorHandler, TokenHandler, OptimisticUpdateOptions } from "./client";
 
 // Reconciliation UX components
 export { ReconciliationBanner } from "./ReconciliationBanner";

@@ -7,3 +7,4 @@ pkg/
 *.pb.go
 __pycache__
 .env
+tests/promptfoo-results.json
