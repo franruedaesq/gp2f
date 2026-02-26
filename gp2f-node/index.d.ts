@@ -12,10 +12,11 @@ export interface ActivityConfig {
 }
 
 export class JsGp2FServer {
-    constructor(config: { port: number });
+    constructor(config: { port?: number; host?: string });
     register(workflow: JsWorkflow): void;
     start(): Promise<void>;
 }
+
 
 export class JsWorkflow {
     constructor(id: string);

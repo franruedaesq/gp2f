@@ -1,6 +1,6 @@
 {
   "name": "@gp2f/server",
-  "version": "0.1.5",
+  "version": "0.1.6",
   "description": "Native Node.js bindings for the GP2F policy engine – powered by napi-rs",
   "main": "index.js",
   "types": "index.d.ts",
