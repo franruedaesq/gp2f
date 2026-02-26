@@ -29,7 +29,7 @@ Introduce a **Fluent API** (chainable methods) that generates the underlying AST
 ### Key Features:
 
 *   **Chainable Methods**: `p.field(...).equal(...)`, `p.and(...)`.
-*   **Explicit Naming**: Use verbose, human-readable method names (e.g., `greaterThan`, `notEqual`) to eliminate ambiguity.
+*   **Dual Naming Strategy**: Support both verbose (e.g., `greaterThan`) and abbreviated (e.g., `gt`) method names to suit different developer preferences.
 *   **Type Safety**: TypeScript definitions ensure correct usage of operators and values.
 *   **Readability**: Code reads like natural language sentences.
 *   **IDE Autocompletion**: Discover available methods and operators via IntelliSense.
@@ -41,19 +41,19 @@ We propose a `PolicyBuilder` class (exposed as `p` or `Policy`) with static meth
 
 ### 3.1. Field Comparisons
 
-We propose using verbose names for clarity, avoiding abbreviations like `eq` or `gte` which can be confusing.
+We will support aliases to provide flexibility:
 
-| Operator | Method Name | Example |
-| :--- | :--- | :--- |
-| **Equal** | `equal(value)` | `p.field('/role').equal('admin')` |
-| **Not Equal** | `notEqual(value)` | `p.field('/status').notEqual('archived')` |
-| **Greater Than** | `greaterThan(value)` | `p.field('/score').greaterThan(50)` |
-| **Greater/Equal** | `greaterThanOrEqual(value)` | `p.field('/age').greaterThanOrEqual(18)` |
-| **Less Than** | `lessThan(value)` | `p.field('/latency').lessThan(100)` |
-| **Less/Equal** | `lessThanOrEqual(value)` | `p.field('/attempts').lessThanOrEqual(3)` |
-| **In Array** | `in(array)` | `p.field('/role').in(['admin', 'editor'])` |
-| **Contains** | `contains(value)` | `p.field('/tags').contains('urgent')` |
-| **Exists** | `exists(path)` | `p.exists('/user/email')` |
+| Operator | Verbose Name | Alias | Example |
+| :--- | :--- | :--- | :--- |
+| **Equal** | `equal(value)` | `eq(value)` | `p.field('/role').eq('admin')` |
+| **Not Equal** | `notEqual(value)` | `neq(value)` | `p.field('/status').notEqual('archived')` |
+| **Greater Than** | `greaterThan(value)` | `gt(value)` | `p.field('/score').gt(50)` |
+| **Greater/Equal** | `greaterThanOrEqual(value)` | `gte(value)` | `p.field('/age').gte(18)` |
+| **Less Than** | `lessThan(value)` | `lt(value)` | `p.field('/latency').lessThan(100)` |
+| **Less/Equal** | `lessThanOrEqual(value)` | `lte(value)` | `p.field('/attempts').lte(3)` |
+| **In Array** | `in(array)` | - | `p.field('/role').in(['admin', 'editor'])` |
+| **Contains** | `contains(value)` | - | `p.field('/tags').contains('urgent')` |
+| **Exists** | `exists(path)` | - | `p.exists('/user/email')` |
 
 ### 3.2. Logical Operators
 
@@ -136,8 +136,8 @@ p.vibe().intent('frustrated').minConfidence(0.8)
 p.or(
   // Rule 1: Standard approver for small loans
   p.and(
-    p.field('/user/role').equal('approver'),
-    p.field('/loan/amount').lessThan(10000)
+    p.field('/user/role').eq('approver'),
+    p.field('/loan/amount').lt(10000)
   ),
   // Rule 2: Senior manager override
   p.field('/user/role').equal('senior_manager'),
@@ -146,15 +146,30 @@ p.or(
 )
 ```
 
-## 4. Implementation Strategy
+## 4. Implementation Strategy & Impact
 
-1.  **Shared Library**: Create the builder logic in a shared location (or replicate in both `@gp2f/server` and `@gp2f/client-sdk`) to ensure consistency.
-2.  **Builder Class**: Implement a `PolicyBuilder` class that holds the AST state.
-3.  **Static Factory**: Expose a constant instance or static class `p` to start the chain.
-4.  **`build()` method**: The builder instances should either:
-    *   Have a `.build()` method that returns `AstNode`.
-    *   Or simply implement `toJSON()` so they can be passed directly where `AstNode` is expected (if the API accepts objects with `toJSON`).
-    *   **Preferred**: The API (e.g., `wf.addActivity`) should be updated to accept `AstNode | PolicyBuilder`.
+### 4.1. Difficulty Level: Low to Medium
+
+Supporting aliases (e.g., `eq` alongside `equal`) is trivial in the builder implementation; they can simply map to the same underlying AST generation logic. The main effort lies in ensuring the TypeScript definitions (`.d.ts`) are comprehensive and well-documented for both sets of methods.
+
+### 4.2. Impacted Files
+
+The implementation will primarily involve creating new files rather than modifying the core engine, minimizing risk.
+
+*   **`client-sdk/src/policy-builder.ts`** (New):
+    *   Primary implementation of the fluent API for the client SDK.
+    *   Will export the `p` (or `Policy`) builder object.
+*   **`gp2f-node/src/policy-builder.ts`** (New):
+    *   Equivalent implementation for the server-side Node.js bindings.
+    *   Ideally, this code should be shared/reused from a common package to avoid duplication.
+*   **`client-sdk/src/index.ts`** & **`gp2f-node/index.d.ts`**:
+    *   Updated to export the new builder API.
+*   **Documentation**:
+    *   `README.md`, `docs/sdk-reference/*.md`: Examples will need to be updated to showcase the new syntax.
+
+### 4.3. Migration Path
+
+This is an **additive change**. The existing raw JSON AST format will continue to work exactly as before. Users can mix and match or migrate incrementally. No breaking changes are required.
 
 ## 5. Benefits
 
