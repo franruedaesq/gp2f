@@ -54,25 +54,32 @@
 //!
 //! ## Production SDK dependency
 //!
-//! Add to `server/Cargo.toml`:
-//! ```toml
-//! temporal-client = { git = "https://github.com/temporalio/sdk-rust", optional = true }
-//! ```
-//! Then update the `temporal-production` feature:
-//! ```toml
-//! temporal-production = ["dep:temporal-client"]
-//! ```
-//! Build with `--features temporal-production`.
+//! The `temporal-production` feature wires in `temporalio-client` from
+//! <https://github.com/temporalio/sdk-core>.  The dependency is declared in
+//! `gp2f-store/Cargo.toml` as an optional git dependency:
 //!
-//! The feature-gated implementation in [`TemporalStore::connect`] and
-//! [`TemporalStore::route_to_temporal`] shows the exact SDK call pattern to
-//! uncomment once the crate is available.
+//! ```toml
+//! temporalio-client = { git = "https://github.com/temporalio/sdk-core", optional = true }
+//! temporalio-common = { git = "https://github.com/temporalio/sdk-core", optional = true }
+//! ```
+//!
+//! Build with `--features temporal-production`.
 
 use std::sync::Arc;
 
 use async_trait::async_trait;
 use serde::{Deserialize, Serialize};
 use tokio::sync::Mutex;
+
+#[cfg(feature = "temporal-production")]
+use temporalio_client::{
+    Client as TemporalClient, ClientOptions, Connection, ConnectionOptions, UntypedSignal,
+    UntypedWorkflow, WorkflowSignalOptions,
+};
+#[cfg(feature = "temporal-production")]
+use temporalio_common::data_converters::{PayloadConverter, RawValue};
+#[cfg(feature = "temporal-production")]
+use url::Url;
 
 use crate::{
     event_store::{EventStore, OpOutcome, StoredEvent},
@@ -211,12 +218,9 @@ pub struct ApplyOpSignal {
 ///
 /// ## Enabling the production SDK
 ///
-/// 1. Add to `server/Cargo.toml`:
-/// ```toml
-/// temporal-client = { git = "https://github.com/temporalio/sdk-rust", optional = true }
-/// ```
-/// 2. Update the `temporal-production` feature to include `dep:temporal-client`.
-/// 3. Build with `--features temporal-production`.
+/// Enable the `temporal-production` feature when building.  The
+/// `temporalio-client` and `temporalio-common` optional dependencies
+/// (declared in `gp2f-store/Cargo.toml`) will be activated automatically.
 ///
 /// See the module-level documentation for the full configuration example.
 pub struct TemporalStore {
@@ -230,6 +234,9 @@ pub struct TemporalStore {
     fallback: Arc<EventStore>,
     /// Whether the Temporal client connection has been established.
     connected: Arc<Mutex<bool>>,
+    /// The connected Temporal gRPC client (production only).
+    #[cfg(feature = "temporal-production")]
+    client: Arc<Mutex<Option<TemporalClient>>>,
 }
 
 impl TemporalStore {
@@ -244,71 +251,39 @@ impl TemporalStore {
             retention_days: 90,
             fallback: Arc::new(EventStore::new()),
             connected: Arc::new(Mutex::new(false)),
+            #[cfg(feature = "temporal-production")]
+            client: Arc::new(Mutex::new(None)),
         }
     }
 
     /// Attempt to connect to the Temporal cluster.
     ///
-    /// When the `temporal-production` feature is enabled, this method performs
-    /// a TCP connectivity probe to the Temporal frontend endpoint to verify
-    /// basic reachability before marking the store as connected.
+    /// When the `temporal-production` feature is enabled, this method establishes
+    /// a gRPC connection to the Temporal frontend using the `temporalio-client`
+    /// SDK and stores the connected client for use by [`TemporalStore::route_to_temporal`].
     ///
     /// When `temporal-production` is **not** enabled (dev/test mode), the store
     /// is marked as connected immediately and operates against the in-memory
     /// fallback, with a prominent warning.
-    ///
-    /// Once the `temporal-client` SDK is wired in, replace the TCP probe with
-    /// the full gRPC client construction:
-    ///
-    /// ```rust,ignore
-    /// use temporal_client::{Client, ClientOptions, WorkflowClientTrait};
-    /// use url::Url;
-    ///
-    /// let opts = ClientOptions::default()
-    ///     .target_url(Url::parse(&self.endpoint)
-    ///         .map_err(|e| TemporalError::Connection(e.to_string()))?)
-    ///     .client_name("gp2f-server")
-    ///     .client_version(env!("CARGO_PKG_VERSION"))
-    ///     .namespace(self.namespace.clone());
-    ///
-    /// let _client = opts.connect().await
-    ///     .map_err(|e| TemporalError::Connection(e.to_string()))?;
-    /// ```
     pub async fn connect(&self) -> Result<(), TemporalError> {
         #[cfg(feature = "temporal-production")]
         {
-            // Production path: verify the Temporal frontend is reachable via
-            // a TCP probe.  This replaces the previous stub that returned an
-            // error immediately, ensuring the server fails fast at startup when
-            // the endpoint is unreachable rather than silently falling back to
-            // in-memory storage.
-            //
-            // Strip any scheme prefix so that endpoints like
-            // "http://temporal:7233", "https://temporal:7233", or bare
-            // "temporal:7233" all resolve to a valid "host:port" string for
-            // TcpStream::connect.
-            //
-            // TODO: replace with the full temporal-client gRPC connection once
-            // the `temporal-client` crate is added to Cargo.toml.
-            let addr = self
-                .endpoint
-                .find("://")
-                .map(|i| &self.endpoint[i + 3..])
-                .unwrap_or(&self.endpoint);
-            // Ensure a port is present; Temporal defaults to 7233.
-            let addr = if addr.contains(':') {
-                addr.to_owned()
-            } else {
-                format!("{addr}:7233")
-            };
-            tokio::net::TcpStream::connect(addr.as_str())
+            // Production path: establish a gRPC connection to the Temporal
+            // frontend using the temporalio-client SDK.
+            let url = Url::parse(&self.endpoint)
+                .map_err(|e| TemporalError::Connection(e.to_string()))?;
+            let conn_opts = ConnectionOptions::new(url)
+                .client_name("gp2f-server")
+                .client_version(env!("CARGO_PKG_VERSION"))
+                .build();
+            let connection = Connection::connect(conn_opts)
                 .await
-                .map_err(|e| {
-                    TemporalError::Connection(format!(
-                        "cannot reach Temporal frontend at {}: {}",
-                        self.endpoint, e
-                    ))
-                })?;
+                .map_err(|e| TemporalError::Connection(e.to_string()))?;
+            let client_opts = ClientOptions::new(self.namespace.clone()).build();
+            // SAFETY: ClientNewError is an uninhabited enum; new() never fails.
+            let temporal_client = TemporalClient::new(connection, client_opts)
+                .expect("Client::new is infallible");
+            *self.client.lock().await = Some(temporal_client);
             *self.connected.lock().await = true;
             tracing::info!(
                 endpoint = %self.endpoint,
@@ -365,35 +340,6 @@ impl TemporalStore {
     ///   "outcome": "ACCEPTED"
     /// }
     /// ```
-    ///
-    /// ## Production implementation
-    ///
-    /// ```rust,ignore
-    /// use temporal_client::WorkflowClientTrait;
-    ///
-    /// let signal = ApplyOpSignal {
-    ///     op_id: msg.op_id.clone(),
-    ///     message: msg.clone(),
-    ///     outcome: outcome_str.to_owned(),
-    /// };
-    /// let payload = serde_json::to_value(&signal)
-    ///     .map_err(|e| TemporalError::Signal(e.to_string()))?;
-    ///
-    /// match client
-    ///     .signal_workflow_execution(workflow_id, "", "ApplyOp", Some(payload))
-    ///     .await
-    /// {
-    ///     Ok(_) => {}
-    ///     // Workflow already started: signal the existing run.
-    ///     Err(e) if e.is_workflow_execution_already_started() => {
-    ///         client
-    ///             .signal_workflow_execution(workflow_id, "", "ApplyOp", Some(payload))
-    ///             .await
-    ///             .map_err(|e| TemporalError::Signal(e.to_string()))?;
-    ///     }
-    ///     Err(e) => return Err(TemporalError::Signal(e.to_string())),
-    /// }
-    /// ```
     async fn route_to_temporal(
         &self,
         key: &str,
@@ -415,33 +361,34 @@ impl TemporalStore {
 
         #[cfg(feature = "temporal-production")]
         {
-            // Production path: send the ApplyOp signal to the Temporal workflow.
-            // Requires temporal-client (see module docs).  The pattern below
-            // handles WorkflowExecutionAlreadyStartedError by signalling the
-            // existing run rather than starting a new one.
             let signal = ApplyOpSignal {
                 op_id: msg.op_id.clone(),
                 message: msg.clone(),
                 outcome: outcome_str.to_owned(),
             };
-            tracing::debug!(
-                signal_payload = %serde_json::to_string(&signal).unwrap_or_default(),
-                "ApplyOp signal payload"
-            );
-            // The temporal-client SDK is not yet wired in.  Return an explicit
-            // error rather than pretending the signal was delivered.  This
-            // ensures the `append` call fails loudly so operators know that
-            // Temporal durability is not active and no events will be silently
-            // dropped.
-            //
-            // To activate: add `temporal-client` to Cargo.toml and replace this
-            // block with the gRPC signal call shown in the doc comment above.
-            return Err(TemporalError::Signal(
-                "temporal-client SDK is not wired in; \
-                 add temporal-client to Cargo.toml and implement the gRPC \
-                 signal call before enabling the temporal-production feature"
-                    .into(),
-            ));
+            // Serialize the signal payload using Temporal's JSON data converter.
+            let pc = PayloadConverter::serde_json();
+            let raw = RawValue::from_value(&signal, &pc);
+            // Clone the client out of the lock so the lock is released before
+            // the async gRPC call (Client is cheap to clone – it wraps Arcs).
+            let client = {
+                let guard = self.client.lock().await;
+                guard
+                    .as_ref()
+                    .ok_or_else(|| {
+                        TemporalError::Signal("Temporal client not connected".into())
+                    })?
+                    .clone()
+            };
+            let handle = client.get_workflow_handle::<UntypedWorkflow>(&workflow_id);
+            handle
+                .signal(
+                    UntypedSignal::new("ApplyOp"),
+                    raw,
+                    WorkflowSignalOptions::default(),
+                )
+                .await
+                .map_err(|e| TemporalError::Signal(e.to_string()))?;
         }
 
         #[cfg(not(feature = "temporal-production"))]
@@ -483,8 +430,9 @@ impl PersistentStore for TemporalStore {
             self.route_to_temporal(&key, &msg, outcome)
                 .await
                 .map_err(|e| PersistenceError::Signal(e.to_string()))?;
-            // Use the in-memory counter only for the synchronous seq response.
-            // TODO: replace with the Temporal history event ID once the SDK is wired in.
+            // Use the in-memory counter for the synchronous sequence response.
+            // The Temporal history event ID is not returned by the signal API;
+            // the authoritative ordering lives in the workflow's Temporal history.
             return Ok(self.fallback.append(msg, outcome));
         }
 

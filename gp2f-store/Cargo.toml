@@ -8,7 +8,7 @@ description = "GP2F persistence abstractions and implementations"
 
 [features]
 postgres-store = ["dep:sqlx"]
-temporal-production = []
+temporal-production = ["dep:temporalio-client", "dep:temporalio-common"]
 
 [dependencies]
 gp2f-core = { path = "../gp2f-core" }
@@ -19,4 +19,7 @@ chrono.workspace = true
 tracing = "0.1"
 async-trait = "0.1"
 tokio = { version = "1", features = ["full"] }
+url = "2"
 sqlx = { version = "0.8", features = ["runtime-tokio", "tls-native-tls", "postgres", "json", "chrono"], optional = true }
+temporalio-client = { git = "https://github.com/temporalio/sdk-core", optional = true }
+temporalio-common = { git = "https://github.com/temporalio/sdk-core", optional = true }
