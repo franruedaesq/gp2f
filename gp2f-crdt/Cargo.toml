@@ -21,3 +21,4 @@ serde.workspace = true
 serde_json.workspace = true
 chrono.workspace = true
 base64 = "0.22"
+tracing = "0.1"

@@ -293,6 +293,7 @@ fn make_msg(tenant_id: &str, op_id: &str, hash: &str, payload: Value) -> ClientM
         client_signature: None,
         role: "default".into(),
         vibe: None,
+        trace_id: None,
     }
 }
 

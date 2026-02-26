@@ -63,6 +63,15 @@ pub struct ClientMessage {
     /// Optional behavioral signal from the on-device Semantic Vibe Engine.
     #[serde(default)]
     pub vibe: Option<VibeVector>,
+    /// Optional trace identifier for end-to-end request correlation.
+    ///
+    /// When set, this value is propagated through the Actor → Reconciler →
+    /// Persistence call chain so that all log entries for a single operation
+    /// share the same `trace_id` in structured (JSON) logs.  Clients may set
+    /// this to a UUID or other unique request identifier; if absent the server
+    /// falls back to `op_id` for correlation.
+    #[serde(default)]
+    pub trace_id: Option<String>,
 }
 
 fn default_role() -> String {
@@ -121,6 +130,9 @@ impl ClientMessage {
         self.instance_id = sanitize_field(&self.instance_id);
         self.client_snapshot_hash = sanitize_field(&self.client_snapshot_hash);
         self.role = sanitize_field(&self.role);
+        if let Some(tid) = &self.trace_id {
+            self.trace_id = Some(sanitize_field(tid));
+        }
     }
 
     /// Validate all string fields against configured length limits.
@@ -356,6 +368,7 @@ mod tests {
             client_signature: None,
             role: "default".into(),
             vibe: None,
+            trace_id: None,
         }
     }
 

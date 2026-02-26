@@ -203,6 +203,7 @@ mod tests {
             client_signature: None,
             role: "default".into(),
             vibe: None,
+            trace_id: None,
         }
     }
 

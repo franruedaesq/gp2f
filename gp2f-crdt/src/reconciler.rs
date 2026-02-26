@@ -80,6 +80,17 @@ impl Reconciler {
 
     /// Process a [`ClientMessage`] and return a [`ServerMessage`].
     pub fn reconcile(&self, msg: &ClientMessage) -> ServerMessage {
+        // Emit a structured log event so that the trace_id is visible in the
+        // Reconciler layer, correlating with the parent span created by the Actor.
+        tracing::debug!(
+            trace_id = %msg.trace_id.as_deref().unwrap_or(msg.op_id.as_str()),
+            op_id = %msg.op_id,
+            tenant_id = %msg.tenant_id,
+            workflow_id = %msg.workflow_id,
+            instance_id = %msg.instance_id,
+            "reconciler processing op",
+        );
+
         // 0. Input validation: enforce length limits on all string fields to
         //    prevent memory exhaustion attacks before any further processing.
         if let Err(reason) = msg.validate() {
@@ -476,6 +487,7 @@ mod tests {
             client_signature: None,
             role: "default".into(),
             vibe: None,
+            trace_id: None,
         }
     }
 

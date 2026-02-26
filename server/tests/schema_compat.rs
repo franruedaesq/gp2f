@@ -29,6 +29,7 @@ fn make_client_message(version: &str) -> ClientMessage {
         client_signature: None,
         role: "default".into(),
         vibe: None,
+        trace_id: None,
     }
 }
 
@@ -170,6 +171,7 @@ fn reconciler_does_not_produce_reload_required_for_valid_version() {
         client_signature: None,
         role: "default".into(),
         vibe: None,
+        trace_id: None,
     };
 
     let response = reconciler.reconcile(&msg);

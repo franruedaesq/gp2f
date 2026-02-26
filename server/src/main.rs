@@ -839,6 +839,7 @@ async fn agent_propose_handler(
         client_signature: None,
         role: "agent".into(),
         vibe: req.vibe.clone(),
+        trace_id: None,
     };
 
     let handle = match state
