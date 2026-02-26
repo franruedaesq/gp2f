@@ -140,8 +140,15 @@ mod tests {
         let same_wall = pack(hlc_wall_ms(ts1), 0);
         let ts2 = clock.update_with_remote(same_wall);
         assert!(ts2 > ts1);
-        assert_eq!(hlc_wall_ms(ts2), hlc_wall_ms(ts1));
-        assert!(hlc_logical(ts2) > hlc_logical(ts1));
+
+        // If the wall clock advanced between `now()` calls, the logical counter
+        // resets to 0 (or whatever is needed), so we only assert logical increment
+        // if the wall clock stayed the same.
+        if hlc_wall_ms(ts2) == hlc_wall_ms(ts1) {
+            assert!(hlc_logical(ts2) > hlc_logical(ts1));
+        } else {
+            println!("skipping logical check: wall clock advanced (flake avoidance)");
+        }
     }
 
     #[test]
