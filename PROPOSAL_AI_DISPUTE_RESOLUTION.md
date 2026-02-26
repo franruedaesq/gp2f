@@ -61,6 +61,7 @@ The agent will autonomously investigate claims, analyze evidence, and *propose* 
 ## Technical Architecture
 
 *   **AI Layer:** Python/Node.js worker integrating OpenAI API (GPT-5).
+    *   *Testing/Demo Note:* For testing purposes, the AI agent will not require model training or complex external vector databases. It will prompt the user for an OpenAI API key and use a standard model (e.g., GPT-4o) with a system prompt to simulate the dispute resolution logic.
 *   **Policy Enforcement:** `@gp2f/server` acting as the gateway.
     *   **Token Service (`gp2f-token`):** Issues short-lived tokens to the AI worker, scoped to specific dispute IDs.
 *   **Frontend:** Support Agent Dashboard (React + `@gp2f/client-sdk`) for escalated cases.

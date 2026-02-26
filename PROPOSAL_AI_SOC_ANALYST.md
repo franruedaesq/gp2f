@@ -64,6 +64,7 @@ This agent will autonomously triage alerts, correlate threats, and execute remed
     *   Updated by CISO/Security Engineering team via a GitOps workflow (Policy-as-Code).
 *   **AI Agent:**
     *   Fine-tuned LLM (GPT-5) with access to security tool documentation and threat intel.
+    *   *Testing/Demo Note:* For testing purposes, no fine-tuning is required. The agent will prompt the user for an OpenAI API key and use a standard model (e.g., GPT-4o) with a system prompt to simulate the threat analysis and remediation proposals.
 
 ## Success Metrics
 *   **Mean Time to Respond (MTTR):** < 1 minute for AI-handled incidents.
