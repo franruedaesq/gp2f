@@ -152,3 +152,95 @@ jobs:
           fi
           echo "::notice::WASM size OK: ${WASM_SIZE_KB} KiB (budget: ${MAX_SIZE_KB} KiB)"
 
+  # ── Node.js native addon ────────────────────────────────────────────────
+
+  node-addon-test:
+    name: Node.js addon – contract tests
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: '20'
+          cache: 'npm'
+          cache-dependency-path: gp2f-node/package.json
+
+      - name: Install npm dependencies
+        run: npm install
+        working-directory: gp2f-node
+
+      - name: Run Jest contract tests
+        run: npm test
+        working-directory: gp2f-node
+
+  node-addon-build:
+    name: Node.js addon – native build (${{ matrix.target }})
+    # Build the .node binary for the three major desktop targets.
+    # The binaries are uploaded as workflow artifacts so they can be bundled
+    # into an npm release.
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - target: x86_64-unknown-linux-gnu
+            os: ubuntu-latest
+          - target: x86_64-apple-darwin
+            os: macos-latest
+          - target: x86_64-pc-windows-msvc
+            os: windows-latest
+    runs-on: ${{ matrix.os }}
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install Rust stable
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: ${{ matrix.target }}
+
+      - name: Install Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: '20'
+
+      - name: Cache cargo registry
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+            target
+          key: ${{ runner.os }}-cargo-node-${{ hashFiles('**/Cargo.lock') }}
+          restore-keys: ${{ runner.os }}-cargo-node-
+
+      - name: Build native addon (release)
+        run: cargo build -p gp2f-node --release --target ${{ matrix.target }}
+
+      - name: Rename .node artifact (Unix)
+        if: runner.os != 'Windows'
+        run: |
+          SRC="target/${{ matrix.target }}/release/libgp2f_node.so"
+          [ -f "target/${{ matrix.target }}/release/libgp2f_node.dylib" ] && \
+            SRC="target/${{ matrix.target }}/release/libgp2f_node.dylib"
+          cp "$SRC" "gp2f-node/gp2f_node.${{ matrix.target }}.node" 2>/dev/null || \
+            find "target/${{ matrix.target }}/release" -name "*.so" -o -name "*.dylib" \
+            | head -1 | xargs -I{} cp {} "gp2f-node/gp2f_node.${{ matrix.target }}.node"
+
+      - name: Rename .node artifact (Windows)
+        if: runner.os == 'Windows'
+        shell: pwsh
+        run: |
+          $src = Get-ChildItem "target\${{ matrix.target }}\release\gp2f_node.dll" -ErrorAction SilentlyContinue
+          if ($src) {
+            Copy-Item $src.FullName "gp2f-node\gp2f_node.${{ matrix.target }}.node"
+          }
+
+      - name: Upload native addon artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: gp2f-node-${{ matrix.target }}
+          path: gp2f-node/gp2f_node.*.node
+          if-no-files-found: warn
+
+

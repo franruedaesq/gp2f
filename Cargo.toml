@@ -3,6 +3,7 @@ members = [
     "policy-core",
     "cli",
     "server",
+    "gp2f-node",
 ]
 resolver = "2"
 
