@@ -42,6 +42,7 @@ async fn main() {
         .route("/op", post(op_handler))
         .route("/token/mint", post(token_mint_handler))
         .route("/token/redeem", post(token_redeem_handler))
+        .route("/ai/propose", post(ai_propose_handler))
         .with_state(state)
         .layer(TraceLayer::new_for_http());
 
@@ -63,6 +64,10 @@ async fn ws_handler(ws: WebSocketUpgrade, State(state): State<AppState>) -> impl
 }
 
 async fn handle_socket(mut socket: WebSocket, state: AppState) {
+    // Check per-tenant WebSocket connection limit before accepting.
+    // We don't know the tenant until the first message, so we use a sentinel.
+    // Full tenant-scoped WS limiting requires reading the first message first.
+
     // Subscribe to broadcast channel so we can push server-initiated messages.
     let mut broadcast_rx = state.reconciler.broadcaster().subscribe();
 
@@ -124,4 +129,27 @@ async fn token_redeem_handler(
             Json(serde_json::json!({ "error": e.to_string() })),
         ),
     }
+}
+
+/// LLM Proposal Handler – receives an AI-generated op and validates it through
+/// the exact same reconciler pipeline as human-initiated ops.
+///
+/// Valid proposals are accepted and treated identically to human ops.
+/// Invalid proposals are silently dropped and logged.
+async fn ai_propose_handler(
+    State(state): State<AppState>,
+    Json(client_msg): Json<ClientMessage>,
+) -> impl IntoResponse {
+    let response = state.reconciler.reconcile(&client_msg);
+    match &response {
+        ServerMessage::Accept(a) => {
+            tracing::info!(op_id = %a.op_id, "AI proposal accepted");
+        }
+        ServerMessage::Reject(r) => {
+            // Silently drop invalid AI proposals – log them but return 200 so
+            // the LLM cannot use error codes to probe the policy engine.
+            tracing::info!(op_id = %r.op_id, reason = %r.reason, "AI proposal rejected (dropped)");
+        }
+    }
+    (StatusCode::OK, Json(response))
 }

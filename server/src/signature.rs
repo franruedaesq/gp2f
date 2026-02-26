@@ -78,6 +78,8 @@ mod tests {
             workflow_id: "wf1".into(),
             instance_id: "inst1".into(),
             client_signature: sig,
+            role: "default".into(),
+            vibe: None,
         }
     }
 

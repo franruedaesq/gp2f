@@ -1,5 +1,20 @@
 use serde::{Deserialize, Serialize};
 
+/// Compact behavioral signal produced by the on-device Semantic Vibe Engine.
+///
+/// The classifier runs entirely locally and never sends raw behavioral data.
+/// Only this ultra-compact vector is attached to every op.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+#[serde(rename_all = "camelCase")]
+pub struct VibeVector {
+    /// Detected user intent (e.g. `"frustrated"`, `"focused"`, `"confused"`).
+    pub intent: String,
+    /// Classifier confidence in [0.0, 1.0].
+    pub confidence: f64,
+    /// The UI element or flow step that is the current bottleneck.
+    pub bottleneck: String,
+}
+
 /// Message the client sends to the server.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
@@ -23,6 +38,17 @@ pub struct ClientMessage {
     /// When present the server validates it; absent ⇒ unauthenticated (dev only).
     #[serde(default)]
     pub client_signature: Option<String>,
+    /// Caller's role within the tenant (used for RBAC checks).
+    /// Defaults to `"default"` when absent.
+    #[serde(default = "default_role")]
+    pub role: String,
+    /// Optional behavioral signal from the on-device Semantic Vibe Engine.
+    #[serde(default)]
+    pub vibe: Option<VibeVector>,
+}
+
+fn default_role() -> String {
+    "default".to_owned()
 }
 
 /// ACCEPT response – the operation was applied successfully.

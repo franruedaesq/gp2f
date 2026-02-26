@@ -57,6 +57,19 @@ pub enum NodeKind {
     Field,
     /// Future-proof stub for external function calls.
     Call,
+    /// Proactive-intervention check against the Semantic Vibe Engine vector.
+    ///
+    /// Evaluates to `true` when:
+    /// - `/vibe/intent` equals `node.value` (if set), **and**
+    /// - `/vibe/confidence` >= `node.path` parsed as a float threshold (if set).
+    ///
+    /// Both conditions are optional; omitting one skips that sub-check.
+    ///
+    /// Example (policy-JSON):
+    /// ```json
+    /// { "kind": "VIBE_CHECK", "value": "frustrated", "path": "0.8" }
+    /// ```
+    VibeCheck,
 }
 
 impl AstNode {
