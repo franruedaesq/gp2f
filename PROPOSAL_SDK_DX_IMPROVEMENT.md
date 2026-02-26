@@ -28,7 +28,8 @@ Introduce a **Fluent API** (chainable methods) that generates the underlying AST
 
 ### Key Features:
 
-*   **Chainable Methods**: `p.field(...).eq(...)`, `p.and(...)`.
+*   **Chainable Methods**: `p.field(...).equal(...)`, `p.and(...)`.
+*   **Explicit Naming**: Use verbose, human-readable method names (e.g., `greaterThan`, `notEqual`) to eliminate ambiguity.
 *   **Type Safety**: TypeScript definitions ensure correct usage of operators and values.
 *   **Readability**: Code reads like natural language sentences.
 *   **IDE Autocompletion**: Discover available methods and operators via IntelliSense.
@@ -40,38 +41,49 @@ We propose a `PolicyBuilder` class (exposed as `p` or `Policy`) with static meth
 
 ### 3.1. Field Comparisons
 
-**Current:**
-```typescript
-{ kind: 'Field', path: '/role', value: 'admin' }
-```
+We propose using verbose names for clarity, avoiding abbreviations like `eq` or `gte` which can be confusing.
 
-**Proposed:**
-```typescript
-import { p } from '@gp2f/server';
-
-p.field('/role').eq('admin')
-p.field('/score').gte(80)
-p.field('/status').in(['active', 'pending'])
-```
+| Operator | Method Name | Example |
+| :--- | :--- | :--- |
+| **Equal** | `equal(value)` | `p.field('/role').equal('admin')` |
+| **Not Equal** | `notEqual(value)` | `p.field('/status').notEqual('archived')` |
+| **Greater Than** | `greaterThan(value)` | `p.field('/score').greaterThan(50)` |
+| **Greater/Equal** | `greaterThanOrEqual(value)` | `p.field('/age').greaterThanOrEqual(18)` |
+| **Less Than** | `lessThan(value)` | `p.field('/latency').lessThan(100)` |
+| **Less/Equal** | `lessThanOrEqual(value)` | `p.field('/attempts').lessThanOrEqual(3)` |
+| **In Array** | `in(array)` | `p.field('/role').in(['admin', 'editor'])` |
+| **Contains** | `contains(value)` | `p.field('/tags').contains('urgent')` |
+| **Exists** | `exists(path)` | `p.exists('/user/email')` |
 
 ### 3.2. Logical Operators
+
+Logical operators combine multiple conditions.
 
 **Current:**
 ```typescript
 {
-  kind: 'And',
+  kind: 'Or',
   children: [
     { kind: 'Field', path: '/role', value: 'admin' },
-    { kind: 'Exists', path: '/session/token' },
-  ],
+    {
+      kind: 'And',
+      children: [
+        { kind: 'Field', path: '/role', value: 'user' },
+        { kind: 'Exists', path: '/session/valid' }
+      ]
+    }
+  ]
 }
 ```
 
 **Proposed:**
 ```typescript
-p.and(
-  p.field('/role').eq('admin'),
-  p.exists('/session/token')
+p.or(
+  p.field('/role').equal('admin'),
+  p.and(
+    p.field('/role').equal('user'),
+    p.exists('/session/valid')
+  )
 )
 ```
 
@@ -84,42 +96,54 @@ p.and(
 
 **Proposed:**
 ```typescript
+// Explicit semantic methods
 p.vibe('frustrated').confidence(0.8)
-// or just confidence:
-p.vibe().confidence(0.9)
+
+// Or generic form
+p.vibe().intent('frustrated').minConfidence(0.8)
 ```
 
-### 3.4. Complex Example
+### 3.4. Complex Real-World Example
 
-**Current:**
+**Scenario**: A "Approve Loan" activity.
+*   **Allowed if**:
+    *   User is an "approver" AND loan amount is < 10,000
+    *   OR
+    *   User is "senior_manager" (any amount)
+    *   OR
+    *   AI detects "urgent_request" intent with > 90% confidence.
+
+**Current (JSON AST):**
 ```typescript
-wf.addActivity(
-  'collect-vitals',
-  {
-    policy: {
+{
+  kind: 'Or',
+  children: [
+    {
       kind: 'And',
       children: [
-        { kind: 'Field', path: '/role', value: 'clinician' },
-        { kind: 'Exists', path: '/patient_id' },
-      ],
+        { kind: 'Field', path: '/user/role', value: 'approver' },
+        { kind: 'Lt', children: [ { kind: 'Field', path: '/loan/amount' }, { kind: 'Field', value: '10000' } ] }
+      ]
     },
-    // ...
-  }
-);
+    { kind: 'Field', path: '/user/role', value: 'senior_manager' },
+    { kind: 'VibeCheck', value: 'urgent_request', path: '0.9' }
+  ]
+}
 ```
 
-**Proposed:**
+**Proposed (Fluent Builder):**
 ```typescript
-wf.addActivity(
-  'collect-vitals',
-  {
-    policy: p.and(
-      p.field('/role').eq('clinician'),
-      p.exists('/patient_id')
-    ),
-    // ...
-  }
-);
+p.or(
+  // Rule 1: Standard approver for small loans
+  p.and(
+    p.field('/user/role').equal('approver'),
+    p.field('/loan/amount').lessThan(10000)
+  ),
+  // Rule 2: Senior manager override
+  p.field('/user/role').equal('senior_manager'),
+  // Rule 3: AI Emergency override
+  p.vibe('urgent_request').confidence(0.9)
+)
 ```
 
 ## 4. Implementation Strategy
@@ -139,7 +163,7 @@ wf.addActivity(
 | **Readability** | Low (verbose, structural noise) | High (concise, intent-focused) |
 | **Write Speed** | Slow (manual structure) | Fast (autocompletion) |
 | **Safety** | Low (runtime errors common) | High (compile-time checks) |
-| **Learning Curve** | Medium (must learn AST schema) | Low (discoverable API) |
+| **Learning Curve** | Medium (must learn AST schema) | Low (discoverable API, standard naming) |
 
 ## 6. Next Steps
 
