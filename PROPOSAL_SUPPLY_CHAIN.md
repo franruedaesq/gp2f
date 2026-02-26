@@ -1,40 +1,42 @@
-# Project Proposal 1: Global Logistics Integrity Platform (GLIP)
+# Project Proposal 1: Sovereign Pharma Cold-Chain (SPCC)
 
 ## 1. Project Definition
-**GLIP** is a local-first, decentralized compliance and tracking system for high-value supply chains (e.g., pharmaceuticals, aerospace parts). It enables field inspectors, customs agents, and logistics providers to verify shipment integrity and compliance against complex, multi-jurisdictional regulatory frameworks, even in disconnected environments (ports, warehouses, cargo ships).
+**SPCC** is a high-integrity logistics platform for tracking temperature-sensitive pharmaceuticals (vaccines, insulin) across multiple custodians (manufacturer -> distributor -> hospital). It operates entirely offline-first to handle connectivity gaps in transit.
 
-Unlike traditional cloud-based ERPs that fail offline or rely on eventual consistency without audit proofs, GLIP uses **gp2f** to cryptographically sign every inspection step, enforce policy rules locally (via WASM), and reconcile data deterministically when connectivity is restored.
+Instead of relying on centralized servers or trust-based APIs, SPCC uses **gp2f** to embed complex regulatory compliance rules directly into the shipment data. Every handover requires cryptographic proof of compliance (e.g., "Temperature stayed within 2°C-8°C for 99.9% of the trip"), enforced deterministically by the local policy engine before a signature is accepted.
 
 ## 2. Objectives
-*   **Zero Data Loss:** Capture 100% of field inspection data regardless of network status.
-*   **Verifiable Audit Trail:** Every state change (scan, temperature check, approval) is cryptographically signed and immutable.
-*   **Real-time Compliance:** Enforce complex regulatory logic (FDA, EAR, GDPR) instantaneously on the client device using `gp2f`'s isomorphic policy engine.
-*   **Conflict Resolution:** Automatically merge non-conflicting updates (e.g., GPS ping vs. humidity log) and flag critical conflicts (e.g., two inspectors sealing the same container with different IDs).
+*   **Proof of Integrity:** Ensure that physical goods match digital records without relying on external trust anchors.
+*   **Complex Temporal Compliance:** Enforce rules like "If temp > 8°C for > 30 mins cumulatively, mark as SPOILED".
+*   **Multi-Party Custody:** Support "Dual Control" handovers where both Driver and Pharmacist must sign an `op` within 5 minutes of each other.
+*   **Offline Conflict Resolution:** Automatically merge sensor logs from the crate (IoT) with manual inspection notes from the driver.
 
 ## 3. Product Requirements Document (PRD)
 
-### 3.1 Frontend Screens (Mobile/Tablet App)
+### 3.1 Frontend Screens (Ruggedized Android Tablet)
 
-#### Screen 1: The Manifest Dashboard (Offline-Ready)
-*   **View:** List of assigned shipments with status indicators (Pending, In-Transit, Held, Cleared).
-*   **Action:** "Scan QR/Barcode" button floating at the bottom.
-*   **Data:** Local `IndexedDB` query of the `Shipment` state projection.
-*   **Policy Check:** Filter visible shipments based on the user's role (e.g., `CustomsAgent` sees all, `Driver` sees only their truck).
+#### Screen 1: Custody Dashboard
+*   **View:** List of active shipments in the user's possession.
+*   **Status Indicators:**
+    *   *Green:* Compliant.
+    *   *Yellow:* Warning (Temp nearing threshold).
+    *   *Red:* **SPOILED** (Policy violation detected).
+*   **Logic:** The status is calculated *live* on the client by replaying the sensor log against the `QualityControl.ast` policy.
 
-#### Screen 2: Dynamic Compliance Checklist
-*   **Trigger:** Scanning a shipment ID.
-*   **Logic:** The UI renders a form based on the `ShipmentType` and current `Jurisdiction`.
-    *   *Example:* If `type == "PHARMA_COLD_CHAIN"`, show "Temperature Log Upload" and "Seal Verification".
+#### Screen 2: Handover Protocol (The "Handshake")
+*   **Action:** "Initiate Transfer".
+*   **QR Code:** Generates a dynamic QR code containing the `ShipmentID` and a cryptographic nonce.
 *   **Interaction:**
-    *   User inputs data (e.g., "Seal #12345 verified").
-    *   **Immediate Feedback:** The `gp2f` WASM engine evaluates the `CompliancePolicy` locally. If the seal doesn't match the manifest, the UI shows a "REJECTED" error instantly, blocking submission.
-*   **Optimistic Update:** On valid submission, the shipment status updates to "Verified" immediately, queuing the `op` for sync.
+    1.  Receiver scans Sender's QR.
+    2.  Receiver's app validates the shipment state (Checking 500+ data points of temp history).
+    3.  If valid, Receiver signs an `AcceptCustody` op.
+    4.  Sender scans Receiver's confirmation QR to sign a `ReleaseCustody` op.
+*   **Constraint:** If the policy engine detects a cumulative temp excursion > 30 mins, the "Accept" button is strictly disabled. The Receiver *cannot* accept a spoiled shipment.
 
-#### Screen 3: Dispute Resolution & Merge
-*   **Trigger:** A server-side rejection (e.g., `REJECTED: Concurrent Modification`).
-*   **View:** Split-screen showing "Your Value" (Local) vs. "Server Value" (Remote) vs. "Base Value".
-*   **Action:** "Accept Remote", "Force Local" (if authorized), or "Merge Manually".
-*   **Backend Support:** Uses `gp2f`'s `ThreeWayPatch` structure to visualize the exact field conflict.
+#### Screen 3: Audit & Dispute
+*   **View:** A timeline of every `op` (Creation, SensorReading, CustodyTransfer).
+*   **Feature:** "Replay Trace". Tap any event to see the exact policy state at that millisecond.
+*   **Conflict:** If two sensors report different temps for the same timestamp, the UI shows a "Data Mismatch" warning and prompts for a manual "Quality Override" (requires Manager Role).
 
 ### 3.2 Backend Architecture (Rust/Axum)
 
@@ -44,53 +46,41 @@ Unlike traditional cloud-based ERPs that fail offline or rely on eventual consis
     ```protobuf
     message ShipmentState {
       string id = 1;
-      string status = 2; // CREATED, IN_TRANSIT, HELD, CLEARED
-      repeated Inspection inspections = 3;
-      map<string, string> metadata = 4; // Dynamic fields
+      string custodian_id = 2; // Current owner
+      repeated SensorReading temp_log = 3; // Time-series data
+      enum Status { OK = 0; WARNING = 1; SPOILED = 2; }
+      Status quality_status = 4;
+      int64 cumulative_excursion_seconds = 5;
     }
     ```
-*   **Events:** `ShipmentCreated`, `InspectionCompleted`, `CustomsHoldApplied`, `LocationUpdated`.
+*   **Events:** `CustodyTransfer`, `SensorLogBatch`, `ManualInspection`.
 
-#### Policy Definitions (AST)
-*   **File:** `policies/compliance_v1.json`
-*   **Logic:**
-    *   *Rule 1:* `InspectionCompleted` is only valid if `user.role == "INSPECTOR"`.
-    *   *Rule 2:* `ClearShipment` is only allowed if `AllMandatoryChecks == true`.
-    *   *Rule 3 (Complex):* If `origin == "HighRiskZone"`, require *two* distinct signatures (Dual Control).
-*   **Format:** Defined using `NodeKind::AND`, `NodeKind::EQ`, `NodeKind::VIBE_CHECK` (for AI risk scoring).
+#### Policy Definitions (AST) - The "Business Logic"
+*   **File:** `policies/vaccine_v2.json`
+*   **Complex Logic (No AI, just Math):**
+    *   *Excursion Check:* Iterate over `temp_log`. If `reading.temp > 8.0` OR `reading.temp < 2.0`, add `(reading.time - prev.time)` to `cumulative_excursion_seconds`.
+    *   *Spoilage Rule:* `IF cumulative_excursion_seconds > 1800 THEN status = SPOILED`.
+    *   *Role Check:* `CustodyTransfer` requires `signer.role == "LicensedPharmacist"`.
+*   **Implementation:** These rules are compiled to WASM. The client runs them every time a new sensor reading comes in via Bluetooth.
 
 ### 3.3 Implementation Steps
 
-#### Step 1: Define the Domain Model
-*   Create `proto/glip.proto` defining the `Shipment` state and specific operation payloads.
-*   Run `protoc` to generate Rust and TypeScript bindings.
+#### Step 1: Define the Proto Schema
+*   Create `proto/spcc.proto`. Define `SensorReading` (timestamp, value, device_id).
+*   Generate Rust/TS code.
 
-#### Step 2: Policy Authoring
-*   Write the "Dual Control" policy in JSON AST format.
-*   Use `gp2f-cli eval` to test the policy against mock shipment states (e.g., ensure it fails with only one signature).
+#### Step 2: Implement Temporal Logic in AST
+*   This is the core complexity. You might need a custom `NodeKind::REDUCE` or similar iterator in `policy-core` (or perform the reduction in the `payload` projection logic and just check the *result* in the Policy).
+    *   *Simpler Approach:* The `Shipment` entity has a `apply(SensorLogBatch)` method in Rust (shared Wasm/Native). The Policy just checks `state.cumulative_excursion_seconds < 1800`.
+    *   **Task:** Write the `Shipment::apply` logic in `policy-core/src/crdt.rs` to handle time-series aggregation deterministically.
 
-#### Step 3: Server-Side Reconciler
-*   Initialize `gp2f_server::Reconciler` with the `Shipment` event store.
-*   Implement `apply_op` trait to mutate the `ShipmentState` based on `op.action`.
-*   Configure `RBAC` to map `user_id` -> `role` (e.g., `inspector`, `admin`).
+#### Step 3: The Handshake Flow
+*   Build the QR code generation in the Client SDK.
+*   Implement the "Atomic Swap" logic: Sender doesn't release until Receiver accepts. This creates two signed `op`s that must be sequenced correctly by the server.
 
-#### Step 4: Client SDK Integration
-*   Initialize `Gp2fClient` with `offlineQueue` enabled.
-*   **Optimistic UI:**
-    ```typescript
-    const handleScan = async (scanData) => {
-      // 1. Construct Op
-      const op = { action: "Inspection", payload: scanData };
-      // 2. Validate Local Policy (WASM)
-      if (!policyEngine.evaluate(currentState, op)) {
-        alert("Policy Violation: Missing required fields");
-        return;
-      }
-      // 3. Send (Optimistic Apply)
-      await client.send(op);
-    };
-    ```
+#### Step 4: Offline Sync & Merge
+*   Use `gp2f`'s `LWW` (Last-Write-Wins) for the `custodian_id` field.
+*   Use `CRDT` (Append-Only Set) for the `temp_log`. Even if logs arrive out of order, they are sorted by timestamp during replay.
 
-#### Step 5: AI Risk Analysis (Optional)
-*   Use `gp2f`'s `VibeEngine` (local ONNX) to analyze photos of the cargo.
-*   If `VibeEngine` detects "Damaged Packaging" (confidence > 0.9), automatically flag the shipment as "HELD" via a `VIBE_CHECK` policy rule.
+#### Step 5: Verification
+*   Write a test case: "Simulate a 40-minute excursion. Assert that `AcceptCustody` fails with `PolicyError: SPOILED`."

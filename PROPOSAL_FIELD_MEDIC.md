@@ -1,13 +1,13 @@
 # Project Proposal 2: Disaster Response Triage System (DRTS)
 
 ## 1. Project Definition
-**DRTS** is a rapid-deployment, offline-first application for managing patient triage, treatment, and evacuation during mass casualty incidents (earthquakes, war zones, remote areas). It enables medical teams to collaborate seamlessly even when cellular infrastructure is down, syncing data opportunistically via mesh networks or sporadic satellite uplinks.
+**DRTS** is a rapid-deployment, offline-first application for managing patient triage, treatment, and evacuation during mass casualty incidents (earthquakes, war zones). It enables medical teams to collaborate seamlessly even when cellular infrastructure is down, syncing data opportunistically via mesh networks or sporadic uplinks.
 
-Leveraging **gp2f**, DRTS ensures that critical patient data (vitals, medication history, triage status) is never lost, conflicts are resolved safely (e.g., two medics updating the same patient record), and treatment protocols are enforced locally to prevent medical errors.
+Leveraging **gp2f**, DRTS ensures that critical patient data (vitals, medication history) is never lost, conflicts are resolved safely (e.g., two medics updating the same patient record), and treatment protocols (START/SALT) are enforced locally to prevent errors.
 
 ## 2. Objectives
 *   **Offline Reliability:** 100% functionality without internet; automatic background sync when connectivity returns.
-*   **Protocol Adherence:** Enforce standardized triage algorithms (START/SALT) via deterministic policy execution.
+*   **Protocol Adherence:** Enforce standardized triage algorithms via deterministic policy execution.
 *   **Resource Management:** Prevent over-allocation of scarce resources (ventilators, OR slots) using strict `TRANSACTIONAL` conflict resolution.
 *   **Data Integrity:** Immutable, signed event logs for every treatment action, ensuring post-incident accountability.
 
@@ -48,7 +48,7 @@ Leveraging **gp2f**, DRTS ensures that critical patient data (vitals, medication
     }
     ```
 
-#### Policy Definitions (AST)
+#### Policy Definitions (AST) - The "Start Protocol"
 *   **File:** `policies/triage_start_v1.json`
 *   **Logic:**
     *   *Rule 1:* If `RespRate > 30`, Category MUST be `RED`.
