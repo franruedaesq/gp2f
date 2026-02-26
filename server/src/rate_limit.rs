@@ -15,8 +15,8 @@
 //! falls back to the in-process [`AiRateLimiter`] which stores counters in
 //! local `Mutex`-guarded `HashMap`s.
 
-use std::{collections::HashMap, sync::Mutex, time::Instant};
 use std::sync::Arc;
+use std::{collections::HashMap, sync::Mutex, time::Instant};
 
 // ── constants ─────────────────────────────────────────────────────────────────
 
@@ -251,7 +251,10 @@ pub struct RedisRateLimiter {
 #[cfg(feature = "redis-broadcast")]
 impl RedisRateLimiter {
     /// Connect to Redis and return a new rate limiter.
-    pub async fn connect(redis_url: &str, max_calls_per_minute: u32) -> Result<Self, redis::RedisError> {
+    pub async fn connect(
+        redis_url: &str,
+        max_calls_per_minute: u32,
+    ) -> Result<Self, redis::RedisError> {
         let client = redis::Client::open(redis_url)?;
         let connection = redis::aio::ConnectionManager::new(client).await?;
         Ok(Self {

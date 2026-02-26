@@ -70,7 +70,10 @@ mod tests {
     #[test]
     fn returns_direct_env_var() {
         std::env::set_var("_TEST_SECRET_DIRECT", "my-value");
-        assert_eq!(resolve_secret("_TEST_SECRET_DIRECT"), Some("my-value".to_owned()));
+        assert_eq!(
+            resolve_secret("_TEST_SECRET_DIRECT"),
+            Some("my-value".to_owned())
+        );
         std::env::remove_var("_TEST_SECRET_DIRECT");
     }
 
