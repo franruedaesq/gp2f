@@ -132,16 +132,38 @@ mod tests {
     #[test]
     fn hlc_logical_increments_when_wall_is_same() {
         let clock = Hlc::new();
-        // Force two consecutive ticks to get the same wall value by injecting
-        // a "wall in the past" via update_with_remote.
-        let ts1 = clock.now();
-        // Simulate wall clock returning the same ms by using update_with_remote
-        // with the same wall component.
-        let same_wall = pack(hlc_wall_ms(ts1), 0);
-        let ts2 = clock.update_with_remote(same_wall);
+        // To guarantee the wall clock is the same, we must use timestamps far
+        // in the future.  If we rely on Utc::now(), a slow CI runner might
+        // advance the clock between calls, which correctly resets the logical
+        // counter to 0 instead of incrementing it.
+        //
+        // Strategy:
+        // 1. Update the clock to a future time T (logical 0).
+        // 2. Update the clock with T again.
+        // 3. Assert the logical counter increments to 1.
+
+        let future_wall = Utc::now().timestamp_millis() as u64 + 3_600_000; // +1 hour
+        let t1 = pack(future_wall, 0);
+
+        // First update sets the clock to (future_wall, 0)
+        let ts1 = clock.update_with_remote(t1);
+        assert_eq!(hlc_wall_ms(ts1), future_wall);
+        assert_eq!(hlc_logical(ts1), 1); // remote was 0, so local becomes 1
+
+        // Second update with the same wall time should increment logic further
+        // We pass 't1' again (which has logical 0), but the internal clock is at logical 1.
+        // wait... update_with_remote(remote) -> max(now, last, remote)
+        // if max_wall == last_wall == remote_wall, logical = max(last_logical, remote_logical) + 1
+        //
+        // internal state after ts1: (future_wall, 1)
+        // call with remote: (future_wall, 0)
+        // max_wall = future_wall
+        // logical = max(1, 0) + 1 = 2
+        let ts2 = clock.update_with_remote(t1);
+
+        assert_eq!(hlc_wall_ms(ts2), future_wall);
+        assert_eq!(hlc_logical(ts2), 2);
         assert!(ts2 > ts1);
-        assert_eq!(hlc_wall_ms(ts2), hlc_wall_ms(ts1));
-        assert!(hlc_logical(ts2) > hlc_logical(ts1));
     }
 
     #[test]
