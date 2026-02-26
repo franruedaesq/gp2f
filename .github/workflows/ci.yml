@@ -41,6 +41,33 @@ jobs:
       - name: cargo fmt check
         run: cargo fmt --all -- --check
 
+  workflow-lint:
+    name: workflow determinism lint
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Reject non-deterministic code in workflow definitions
+        # Workflow definitions must be fully deterministic.  Any use of
+        # wall-clock time (std::time / chrono::Utc::now) or random-number
+        # generation (rand::) inside workflow source files is a hard failure.
+        run: |
+          set -euo pipefail
+          WORKFLOW_FILES=$(find server/src -name "workflow*.rs" -o -name "pilot_workflows.rs")
+          echo "Linting workflow files: $WORKFLOW_FILES"
+          FAILED=0
+          for f in $WORKFLOW_FILES; do
+            if grep -En "(std::time|SystemTime|Instant::now|chrono::Utc::now|rand::|thread_rng|random\(\))" "$f"; then
+              echo "ERROR: Non-deterministic code detected in $f"
+              FAILED=1
+            fi
+          done
+          if [ "$FAILED" -eq 1 ]; then
+            echo "Workflow linting FAILED – remove non-deterministic calls from workflow definitions."
+            exit 1
+          fi
+          echo "Workflow linting passed."
+
   test:
     name: cargo test
     runs-on: ubuntu-latest

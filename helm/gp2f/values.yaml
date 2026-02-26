@@ -122,6 +122,47 @@ secrets:
   # groqApiKey: ""
   # temporalEndpoint: ""
 
+# ── Temporal persistence (Phase 4.1 – isolated Postgres for Temporal history) ─
+# Deploy a dedicated Postgres instance for Temporal so that workflow history
+# writes never contend with application business-data tables.
+# Set temporal.postgres.external = true when using an external managed DB
+# (e.g. RDS, Cloud SQL) and supply the connection string via a Secret.
+temporal:
+  postgres:
+    # Set to true to use an in-cluster Postgres StatefulSet for Temporal.
+    # Set to false when providing an external managed Postgres endpoint.
+    enabled: true
+    image: postgres:16
+    storageSize: 50Gi
+    storageClass: ""
+    resources:
+      requests:
+        cpu: "500m"
+        memory: "1Gi"
+      limits:
+        cpu: "2000m"
+        memory: "4Gi"
+    # Phase 4.2 – Postgres autovacuum and WAL tuning for high-write-throughput
+    # Temporal event-sourcing workloads.  These parameters are injected via
+    # postgresql.conf overrides in the StatefulSet init container.
+    config:
+      # WAL settings – sustain high-throughput event appends without stalling.
+      max_wal_size: "4GB"
+      min_wal_size: "1GB"
+      wal_compression: "on"
+      wal_level: "replica"
+      checkpoint_completion_target: "0.9"
+      # Autovacuum – keep the Temporal history tables lean under constant inserts.
+      autovacuum_vacuum_cost_delay: "2ms"
+      autovacuum_vacuum_scale_factor: "0.01"
+      autovacuum_analyze_scale_factor: "0.005"
+      autovacuum_max_workers: "6"
+      # Shared buffers – Temporal reads recent history frequently; cache it.
+      shared_buffers: "1GB"
+      effective_cache_size: "3GB"
+      work_mem: "16MB"
+      maintenance_work_mem: "256MB"
+
 # ── service account ───────────────────────────────────────────────────────────
 serviceAccount:
   create: true

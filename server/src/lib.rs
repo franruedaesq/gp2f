@@ -1,4 +1,5 @@
 pub mod actor;
+pub mod async_ingestion;
 pub mod broadcast;
 pub mod canary;
 pub mod chaos;
@@ -14,6 +15,7 @@ pub mod rbac;
 pub mod reconciler;
 pub mod redis_broadcast;
 pub mod replay_protection;
+pub mod replay_testing;
 pub mod signature;
 pub mod temporal_store;
 pub mod token_service;

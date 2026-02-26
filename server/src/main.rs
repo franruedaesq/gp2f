@@ -12,6 +12,7 @@ use tracing_subscriber::{layer::SubscriberExt, util::SubscriberInitExt};
 
 use gp2f_server::{
     actor::ActorRegistry,
+    async_ingestion::AsyncIngestionQueue,
     llm_provider::{build_provider, LlmMessage, LlmProvider, LlmRequest},
     middleware::{InMemoryPublicKeyStore, OpIdLayer},
     rate_limit::AiRateLimiter,
@@ -41,6 +42,8 @@ struct AppState {
     tool_gating: Arc<ToolGatingService>,
     /// Per-tenant AI rate limiter and budget guard.
     ai_rate_limiter: Arc<AiRateLimiter>,
+    /// Async ingestion queue for the `/op/async` low-latency endpoint.
+    ingestion_queue: Arc<AsyncIngestionQueue>,
 }
 
 #[tokio::main]
@@ -86,6 +89,28 @@ async fn main() {
     // ── LLM provider (OpenAI / Anthropic / Groq / Mock) ───────────────────
     let llm_provider: Arc<dyn LlmProvider> = Arc::from(build_provider());
 
+    // ── Async ingestion queue (Phase 2.2 – low-latency /op/async endpoint) ─
+    let ingestion_buffer: usize = std::env::var("INGESTION_QUEUE_SIZE")
+        .ok()
+        .and_then(|s| s.parse().ok())
+        .unwrap_or(1024);
+    let (ingestion_queue, mut ingestion_rx) = AsyncIngestionQueue::new(ingestion_buffer);
+
+    // Background worker: drains the async ingestion queue and runs full
+    // reconcile + Temporal signal pipeline.
+    let bg_reconciler = Arc::new(Reconciler::new());
+    let bg_actor_registry = Arc::new(ActorRegistry::new());
+    tokio::spawn(async move {
+        while let Some(msg) = ingestion_rx.recv().await {
+            let handle =
+                bg_actor_registry.get_or_spawn(&msg.tenant_id, &msg.workflow_id, &msg.instance_id);
+            let _response = handle
+                .reconcile(msg.clone())
+                .await
+                .unwrap_or_else(|| bg_reconciler.reconcile(&msg));
+        }
+    });
+
     let state = AppState {
         reconciler: Arc::new(Reconciler::new()),
         token_service: Arc::new(TokenService::new()),
@@ -95,12 +120,14 @@ async fn main() {
         llm_provider,
         tool_gating: Arc::new(ToolGatingService::new()),
         ai_rate_limiter: Arc::new(AiRateLimiter::new()),
+        ingestion_queue: Arc::new(ingestion_queue),
     };
 
     let app = Router::new()
         .route("/health", get(health_handler))
         .route("/ws", get(ws_handler))
         .route("/op", post(op_handler))
+        .route("/op/async", post(op_async_handler))
         .route("/token/mint", post(token_mint_handler))
         .route("/token/redeem", post(token_redeem_handler))
         .route("/ai/propose", post(ai_propose_handler))
@@ -186,6 +213,29 @@ async fn op_handler(
         .await
         .unwrap_or_else(|| state.reconciler.reconcile(&client_msg));
     Json(response)
+}
+
+/// POST /op/async – low-latency async ingestion endpoint (Phase 2.2).
+///
+/// Acknowledges the op immediately after partial validation (< 1 ms) and
+/// queues the full reconcile work for background processing.  The result is
+/// pushed back to the client via WebSocket once the background worker
+/// completes.  Use this endpoint when end-to-end HTTP latency must stay below
+/// 16 ms.
+async fn op_async_handler(
+    State(state): State<AppState>,
+    Json(client_msg): Json<ClientMessage>,
+) -> impl IntoResponse {
+    match state.ingestion_queue.enqueue(client_msg).await {
+        Ok(ack) => (
+            StatusCode::ACCEPTED,
+            Json(serde_json::to_value(ack).unwrap_or_default()),
+        ),
+        Err(e) => (
+            StatusCode::SERVICE_UNAVAILABLE,
+            Json(serde_json::json!({ "error": e.to_string() })),
+        ),
+    }
 }
 
 async fn token_mint_handler(

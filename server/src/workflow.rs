@@ -37,6 +37,14 @@ pub struct ActivityDef {
     /// workflow's `compensation_handlers` map.  Registered automatically on
     /// ACCEPT.
     pub compensation_ref: Option<String>,
+    /// When `true` the activity is a *Local Activity*: it executes in the
+    /// worker process without a Temporal server round-trip for persistence.
+    /// Use for short-lived, low-risk operations where the extra latency of a
+    /// full history event is not acceptable (see Phase 2.1 of the operational
+    /// roadmap).  Local activities are NOT replayed by Temporal on worker
+    /// restart, so they must be idempotent.
+    #[serde(default)]
+    pub is_local: bool,
 }
 
 // ── compensation ──────────────────────────────────────────────────────────────
@@ -69,7 +77,30 @@ pub struct WorkflowDefinition {
     /// Optional AST policy that must pass for *any* access to this workflow.
     /// Evaluated against the caller's RBAC context before activity start.
     pub access_policy: Option<AstNode>,
+    /// Monotonically increasing version number for this workflow definition.
+    /// New workers increment this when logic changes; old workers continue
+    /// draining the previous version's task queue (see Phase 3.2 Worker
+    /// Versioning).
+    #[serde(default = "default_workflow_version")]
+    pub workflow_version: u32,
+    /// Temporal task queue this workflow is assigned to.
+    /// Use versioned queue names (e.g. `"gp2f-queue-v2"`) when deploying
+    /// breaking changes so old and new workers can drain independently.
+    #[serde(default = "default_task_queue")]
+    pub task_queue: String,
 }
+
+fn default_workflow_version() -> u32 {
+    1
+}
+
+fn default_task_queue() -> String {
+    DEFAULT_TASK_QUEUE.into()
+}
+
+/// Default Temporal task queue name.  Override per-workflow when deploying
+/// breaking changes (e.g. `"gp2f-queue-v2"`).
+pub const DEFAULT_TASK_QUEUE: &str = "gp2f-queue-v1";
 
 // ── workflow instance ─────────────────────────────────────────────────────────
 
@@ -88,6 +119,11 @@ pub struct WorkflowInstance {
     pub accepted_op_ids: Vec<String>,
     /// Compensation actions pending execution (LIFO order for rollback).
     pub pending_compensations: Vec<CompensationAction>,
+    /// Set of patch names that have been applied to this instance via
+    /// [`WorkflowInstance::patched`].  Guards against double-application of
+    /// the same patch (Phase 3.1 – Patching API).
+    #[serde(default)]
+    pub applied_patches: Vec<String>,
 }
 
 /// Phase of a workflow instance.
@@ -115,6 +151,7 @@ impl WorkflowInstance {
             next_activity: 0,
             accepted_op_ids: Vec::new(),
             pending_compensations: Vec::new(),
+            applied_patches: Vec::new(),
         }
     }
 
@@ -123,6 +160,10 @@ impl WorkflowInstance {
     /// Returns `Ok(true)` when the activity's AST policy allows the op,
     /// `Ok(false)` when the policy denies it, and `Err` when all activities
     /// have already been completed or the workflow is not in `Running` state.
+    ///
+    /// When the activity's `is_local` flag is set the outcome is identical but
+    /// the caller is responsible for skipping the Temporal persistence
+    /// round-trip (Phase 2.1 – Local Activities).
     pub fn execute_next(
         &mut self,
         definition: &WorkflowDefinition,
@@ -159,13 +200,38 @@ impl WorkflowInstance {
 
             Ok(ActivityOutcome::Accepted {
                 activity_name: activity.name.clone(),
+                is_local: activity.is_local,
                 trace: eval_result.trace,
             })
         } else {
             Ok(ActivityOutcome::Rejected {
                 activity_name: activity.name.clone(),
+                is_local: activity.is_local,
                 trace: eval_result.trace,
             })
+        }
+    }
+
+    /// Apply a named patch to this workflow instance (Phase 3.1 – Patching API).
+    ///
+    /// Returns `true` when the instance was **not** already running under the
+    /// patched code path, so callers can execute new-path logic.  Returns
+    /// `false` when the patch has already been applied (replay of old history).
+    ///
+    /// This mirrors Temporal's `workflow.patched()` / `workflow.get_version()`
+    /// semantics: the first time a live execution reaches this call, the patch
+    /// name is recorded in `applied_patches`.  During replay, the SDK detects
+    /// that the patch marker is absent in the old history and returns `false`,
+    /// so the worker can safely execute old-path logic for in-flight workflows
+    /// while routing new executions through the new path.
+    pub fn patched(&mut self, patch_name: &str) -> bool {
+        if self.applied_patches.iter().any(|p| p == patch_name) {
+            // Patch already applied – return false so callers use old-path logic
+            // during replay.
+            false
+        } else {
+            self.applied_patches.push(patch_name.to_owned());
+            true
         }
     }
 
@@ -191,10 +257,16 @@ impl WorkflowInstance {
 pub enum ActivityOutcome {
     Accepted {
         activity_name: String,
+        /// `true` when the activity ran as a Local Activity (no Temporal
+        /// persistence round-trip).  The caller should skip the Temporal
+        /// signal and handle durability itself.
+        is_local: bool,
         trace: Vec<String>,
     },
     Rejected {
         activity_name: String,
+        /// `true` when the activity was evaluated as a Local Activity.
+        is_local: bool,
         trace: Vec<String>,
     },
 }
@@ -252,11 +324,13 @@ mod tests {
                     name: "step_1".into(),
                     policy: AstNode::literal_true(),
                     compensation_ref: Some("undo_step_1".into()),
+                    is_local: false,
                 },
                 ActivityDef {
                     name: "step_2".into(),
                     policy: AstNode::literal_true(),
                     compensation_ref: None,
+                    is_local: false,
                 },
             ],
             compensation_handlers: {
@@ -271,6 +345,8 @@ mod tests {
                 m
             },
             access_policy: None,
+            workflow_version: 1,
+            task_queue: DEFAULT_TASK_QUEUE.into(),
         }
     }
 
@@ -281,9 +357,12 @@ mod tests {
                 name: "gated_step".into(),
                 policy: AstNode::literal_false(),
                 compensation_ref: None,
+                is_local: false,
             }],
             compensation_handlers: HashMap::new(),
             access_policy: None,
+            workflow_version: 1,
+            task_queue: DEFAULT_TASK_QUEUE.into(),
         }
     }
 
@@ -334,11 +413,13 @@ mod tests {
                     name: "a".into(),
                     policy: AstNode::literal_true(),
                     compensation_ref: Some("undo_a".into()),
+                    is_local: false,
                 },
                 ActivityDef {
                     name: "b".into(),
                     policy: AstNode::literal_true(),
                     compensation_ref: Some("undo_b".into()),
+                    is_local: false,
                 },
             ],
             compensation_handlers: {
@@ -360,6 +441,8 @@ mod tests {
                 m
             },
             access_policy: None,
+            workflow_version: 1,
+            task_queue: DEFAULT_TASK_QUEUE.into(),
         };
 
         let mut inst = WorkflowInstance::start("i_lifo", "t1", &def);
@@ -381,9 +464,12 @@ mod tests {
                 name: "only_step".into(),
                 policy: AstNode::literal_true(),
                 compensation_ref: None,
+                is_local: false,
             }],
             compensation_handlers: HashMap::new(),
             access_policy: None,
+            workflow_version: 1,
+            task_queue: DEFAULT_TASK_QUEUE.into(),
         };
         let mut inst = WorkflowInstance::start("i_done", "t1", &def);
         inst.execute_next(&def, &json!({}), "op-1").unwrap();
@@ -399,5 +485,77 @@ mod tests {
         reg.register(allow_all_def("my_workflow"));
         assert!(reg.get("my_workflow").is_some());
         assert!(reg.get("nonexistent").is_none());
+    }
+
+    // ── Phase 2.1: Local Activities ───────────────────────────────────────
+
+    #[test]
+    fn local_activity_outcome_carries_flag() {
+        let def = WorkflowDefinition {
+            workflow_id: "wf_local".into(),
+            activities: vec![ActivityDef {
+                name: "fast_check".into(),
+                policy: AstNode::literal_true(),
+                compensation_ref: None,
+                is_local: true,
+            }],
+            compensation_handlers: HashMap::new(),
+            access_policy: None,
+            workflow_version: 1,
+            task_queue: DEFAULT_TASK_QUEUE.into(),
+        };
+
+        let mut inst = WorkflowInstance::start("il1", "t1", &def);
+        let outcome = inst.execute_next(&def, &json!({}), "op-local").unwrap();
+        match outcome {
+            ActivityOutcome::Accepted { is_local, .. } => assert!(is_local),
+            ActivityOutcome::Rejected { .. } => panic!("expected Accepted"),
+        }
+    }
+
+    // ── Phase 3.1: Patching API ───────────────────────────────────────────
+
+    #[test]
+    fn patched_returns_true_first_call_false_on_replay() {
+        let def = allow_all_def("wf_patch");
+        let mut inst = WorkflowInstance::start("ip1", "t1", &def);
+
+        // First call: new-path logic should execute.
+        assert!(inst.patched("add-extra-validation-v2"));
+        // Second call with same name: replay of old history – use old path.
+        assert!(!inst.patched("add-extra-validation-v2"));
+    }
+
+    #[test]
+    fn different_patch_names_are_independent() {
+        let def = allow_all_def("wf_patch2");
+        let mut inst = WorkflowInstance::start("ip2", "t1", &def);
+
+        assert!(inst.patched("patch-a"));
+        assert!(inst.patched("patch-b")); // different name → first time
+        assert!(!inst.patched("patch-a")); // already applied
+    }
+
+    // ── Phase 3.2: Worker Versioning ─────────────────────────────────────
+
+    #[test]
+    fn workflow_definition_default_version_and_queue() {
+        let def = allow_all_def("wf_ver");
+        assert_eq!(def.workflow_version, 1);
+        assert_eq!(def.task_queue, "gp2f-queue-v1");
+    }
+
+    #[test]
+    fn workflow_definition_custom_version_and_queue() {
+        let def = WorkflowDefinition {
+            workflow_id: "wf_v2".into(),
+            activities: vec![],
+            compensation_handlers: HashMap::new(),
+            access_policy: None,
+            workflow_version: 2,
+            task_queue: "gp2f-queue-v2".into(),
+        };
+        assert_eq!(def.workflow_version, 2);
+        assert_eq!(def.task_queue, "gp2f-queue-v2");
     }
 }
