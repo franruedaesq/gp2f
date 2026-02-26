@@ -567,10 +567,7 @@ const SANITIZE_BODY_LIMIT: usize = 1_048_576; // 1 MiB
 
 impl<S, ResBody> Service<Request<axum::body::Body>> for SanitizeMiddleware<S>
 where
-    S: Service<Request<axum::body::Body>, Response = Response<ResBody>>
-        + Clone
-        + Send
-        + 'static,
+    S: Service<Request<axum::body::Body>, Response = Response<ResBody>> + Clone + Send + 'static,
     S::Future: Send + 'static,
     ResBody: Default + Send + 'static,
 {

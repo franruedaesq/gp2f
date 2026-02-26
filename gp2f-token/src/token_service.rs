@@ -387,9 +387,7 @@ pub async fn build_token_store() -> DynTokenStore {
                     // the URL is safe to include in logs / panic messages.
                     let safe_url = {
                         let s = url.as_str();
-                        if let (Some(at), Some(scheme_end)) =
-                            (s.rfind('@'), s.find("://"))
-                        {
+                        if let (Some(at), Some(scheme_end)) = (s.rfind('@'), s.find("://")) {
                             format!("{}://***@{}", &s[..scheme_end], &s[at + 1..])
                         } else {
                             url.clone()
