@@ -78,19 +78,28 @@ gp2f/
 │   ├── src/
 │   │   ├── ast.rs      # AstNode + NodeKind types
 │   │   ├── evaluator.rs# Evaluator::evaluate() + unit tests
+│   │   ├── crdt.rs     # CRDT document schema + field strategies
 │   │   └── version.rs  # VersionPolicy (allow-list for AST versions)
 │   └── tests/
 │       └── property_tests.rs  # proptest: random state × random AST
-├── wasm-sdk/           # WASM bindings (wasm-bindgen) – Phase 1
-├── server/             # Axum backend (WebSocket + HTTP)
+├── server/             # Axum HTTP + WebSocket reconciliation server
 │   └── src/
 │       ├── wire.rs     # ClientMessage / AcceptResponse / RejectResponse
-│       └── reconciler.rs  # Stateful reconciler (append-only log)
-├── client-sdk/         # TypeScript npm package – Phase 2
-├── visual-editor/      # React + React Flow AST editor – Phase 6
-├── cli/                # gp2f eval / replay / spoofer binaries
-├── docs/               # This file + wire-protocol.md + ADRs
-└── chaos-tests/        # Spoofer + chaos scenarios
+│       ├── reconciler.rs  # Stateful reconciler (append-only log)
+│       ├── rbac.rs        # Role-based access control
+│       ├── event_store.rs # Append-only partitioned event log
+│       ├── token_service.rs # Ephemeral AI agent tokens
+│       ├── pilot_workflows.rs # Built-in workflow definitions
+│       └── workflow.rs    # WorkflowDefinition + WorkflowInstance
+├── gp2f-node/          # Native Node.js bindings (@gp2f/server) via napi-rs
+│   ├── src/
+│   │   ├── policy.rs   # evaluate / evaluateWithTrace bindings
+│   │   ├── workflow.rs # Workflow class bindings
+│   │   └── server.rs   # GP2FServer class bindings
+│   └── index.d.ts      # TypeScript declarations (auto-generated)
+├── client-sdk/         # TypeScript npm package
+├── cli/                # gp2f eval / replay binaries
+└── docs/               # This file + wire-protocol.md + ADRs
 ```
 
 ---

@@ -12,11 +12,12 @@
 2. [Quick Start (5 minutes)](#2-quick-start-5-minutes)
 3. [Core Concepts](#3-core-concepts)
 4. [TypeScript Client SDK](#4-typescript-client-sdk)
-5. [Rust Server Library](#5-rust-server-library)
-6. [Pilot Workflow Recipes](#6-pilot-workflow-recipes)
-7. [Configuration Reference](#7-configuration-reference)
-8. [Troubleshooting](#8-troubleshooting)
-9. [Migration & Upgrade Guide](#9-migration--upgrade-guide)
+5. [Node.js Native Bindings](#5-nodejs-native-bindings)
+6. [Rust Server Library](#6-rust-server-library)
+7. [Pilot Workflow Recipes](#7-pilot-workflow-recipes)
+8. [Configuration Reference](#8-configuration-reference)
+9. [Troubleshooting](#9-troubleshooting)
+10. [Migration & Upgrade Guide](#10-migration--upgrade-guide)
 
 ---
 
@@ -295,7 +296,59 @@ const client = new Gp2fClient({
 
 ---
 
-## 5. Rust Server Library
+## 5. Node.js Native Bindings
+
+The `gp2f-node` package (`@gp2f/server`) provides native Node.js bindings for the GP2F policy engine and workflow runtime via [napi-rs](https://napi.rs/). Use it when you want to evaluate GP2F policies or run workflows **inside a Node.js process** without spawning a separate server.
+
+### Installation
+
+```bash
+cd gp2f-node && npm install
+```
+
+### Evaluate a policy from Node.js
+
+```typescript
+import { evaluate, evaluateWithTrace } from '@gp2f/server';
+
+const ok = evaluate(
+  { kind: 'Field', path: '/role', value: 'admin' },
+  { role: 'admin' }
+);
+// => true
+
+const { result, trace } = evaluateWithTrace(
+  { kind: 'LiteralTrue' },
+  {}
+);
+// => { result: true, trace: ['[0] LiteralTrue => true'] }
+```
+
+### Run a workflow from Node.js
+
+```typescript
+import { Workflow, GP2FServer } from '@gp2f/server';
+
+const wf = new Workflow('document-approval');
+wf.addActivity(
+  'review',
+  { policy: { kind: 'Field', path: '/role', value: 'reviewer' } },
+  async (ctx) => { console.log('reviewing', ctx.instanceId); }
+);
+
+const server = new GP2FServer({ port: 3000 });
+server.register(wf);
+await server.start();
+// POST /workflow/run  – execute next activity
+// POST /workflow/dry-run – evaluate all policies without side-effects
+// GET  /health
+```
+
+See [`docs/sdk-reference/nodejs-bindings.md`](sdk-reference/nodejs-bindings.md) for the full API reference.
+
+---
+
+## 6. Rust Server Library
 
 ### Adding to Cargo.toml
 
@@ -385,9 +438,9 @@ limits.set_limits("enterprise-tenant", TenantLimits {
 
 ---
 
-## 6. Pilot Workflow Recipes
+## 7. Pilot Workflow Recipes
 
-### 6.1 Medical Triage Intake
+### 7.1 Medical Triage Intake
 
 ```rust
 use gp2f_server::pilot_workflows::medical_triage_intake;
@@ -417,7 +470,7 @@ inst.execute_next(&def, &json!({ "role": "admin" }), "op-4")?;
 assert_eq!(inst.status, WorkflowStatus::Completed);
 ```
 
-### 6.2 Supply-Chain Offline Delivery Update
+### 7.2 Supply-Chain Offline Delivery Update
 
 This workflow is designed for network-unreliable environments.  Activities can
 be executed while offline; ops queue and reconcile automatically on reconnect.
@@ -440,7 +493,7 @@ inst.execute_next(&def, &json!({
 }), "op-4")?;
 ```
 
-### 6.3 Multi-Party Contract Negotiation
+### 7.3 Multi-Party Contract Negotiation
 
 ```rust
 use gp2f_server::pilot_workflows::multi_party_contract_negotiation;
@@ -456,7 +509,7 @@ inst.execute_next(&def, &json!({ "role": "signatory","executive_approved": true 
 
 ---
 
-## 7. Configuration Reference
+## 8. Configuration Reference
 
 ### Environment Variables
 
@@ -480,7 +533,7 @@ inst.execute_next(&def, &json!({ "role": "signatory","executive_approved": true 
 
 ---
 
-## 8. Troubleshooting
+## 9. Troubleshooting
 
 ### "snapshot hash mismatch"
 
@@ -515,7 +568,7 @@ The `trace` field in the response lists every node visited.
 
 ---
 
-## 9. Migration & Upgrade Guide
+## 10. Migration & Upgrade Guide
 
 ### 0.0.x → 0.1.0
 
@@ -527,3 +580,7 @@ The `trace` field in the response lists every node visited.
   Snapshot markers are backward-compatible with existing replay consumers.
 - **Pilot workflows**: Three new workflow definitions added in
   `gp2f_server::pilot_workflows`.  No breaking changes to existing workflows.
+- **Node.js native bindings**: The new `@gp2f/server` package (`gp2f-node/`)
+  exposes the policy evaluator and workflow runtime as a native Node.js addon.
+  This is an **additive** change; existing TypeScript client SDK users are
+  unaffected.
