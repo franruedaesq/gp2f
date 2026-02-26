@@ -6,13 +6,31 @@ authors.workspace = true
 license.workspace = true
 description = "Isomorphic AST policy evaluator for GP2F"
 
+[features]
+# Enable the Rust standard library (default). Disable only when targeting
+# bare-metal / WASM environments that cannot link against std.
+default = ["std"]
+std = [
+    "serde/std",
+    "serde_json/std",
+    "thiserror/std",
+    "blake3/std",
+    "dep:chrono",
+    "dep:yrs",
+]
+
 [dependencies]
-serde.workspace = true
-serde_json.workspace = true
-blake3.workspace = true
-thiserror.workspace = true
-chrono.workspace = true
-yrs = "0.25"
+# Core serialization — no_std-compatible via the alloc feature.
+serde = { version = "1", features = ["derive"], default-features = false }
+serde_json = { version = "1", default-features = false, features = ["alloc"] }
+blake3 = { version = "1", default-features = false }
+thiserror = { version = "2", default-features = false }
+# Deterministic fixed-point arithmetic (replaces f64 for numeric comparisons).
+rust_decimal = { version = "1", default-features = false, features = ["serde"] }
+# std-only: CRDT support requires yrs which depends on std.
+yrs = { version = "0.25", optional = true }
+# std-only: DateTime utilities (for timestamp normalization helpers).
+chrono = { version = "0.4", features = ["serde"], optional = true }
 
 [dev-dependencies]
-proptest.workspace = true
+proptest = { version = "1", default-features = false, features = ["std"] }

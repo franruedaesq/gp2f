@@ -112,6 +112,17 @@ pub struct HelloMessage {
     pub server_hlc_ts: u64,
 }
 
+/// RELOAD_REQUIRED – sent when the client's AST version is incompatible with
+/// the server.  The client MUST reload its policy bundle before retrying.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ReloadRequired {
+    /// The minimum AST version the server accepts (semver).
+    pub min_required_version: String,
+    /// Human-readable explanation of why a reload is required.
+    pub reason: String,
+}
+
 /// Top-level server message (either accept or reject).
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(tag = "type", rename_all = "SCREAMING_SNAKE_CASE")]
@@ -120,6 +131,8 @@ pub enum ServerMessage {
     Reject(RejectResponse),
     /// Sent once per connection immediately after the WebSocket handshake.
     Hello(HelloMessage),
+    /// Sent when the client's AST version is too old; client must reload.
+    ReloadRequired(ReloadRequired),
 }
 
 /// Request body for `POST /agent/propose`.

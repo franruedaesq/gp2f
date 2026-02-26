@@ -69,8 +69,13 @@ jobs:
           echo "Workflow linting passed."
 
   test:
-    name: cargo test
-    runs-on: ubuntu-latest
+    name: cargo test (${{ matrix.os }})
+    # Run the determinism oracle on all three major platforms to verify
+    # bit-for-bit parity (Phase 2 – Determinism Hardening).
+    strategy:
+      matrix:
+        os: [ubuntu-latest, macos-latest, windows-latest]
+    runs-on: ${{ matrix.os }}
     steps:
       - uses: actions/checkout@v4
 
@@ -89,3 +94,61 @@ jobs:
 
       - name: cargo test (all crates)
         run: cargo test --workspace
+
+  wasm-build:
+    name: WASM build + wasm-opt + size check
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install Rust stable + wasm32 target
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: wasm32-unknown-unknown
+
+      - name: Cache cargo registry
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+            target
+          key: ${{ runner.os }}-wasm-${{ hashFiles('**/Cargo.lock') }}
+          restore-keys: ${{ runner.os }}-wasm-
+
+      - name: Install wasm-opt (binaryen)
+        run: |
+          sudo apt-get update -qq
+          sudo apt-get install -y binaryen
+
+      - name: Build policy-core as WASM (release, std feature enabled)
+        run: |
+          cargo build -p policy-core \
+            --target wasm32-unknown-unknown \
+            --release
+
+      - name: Run wasm-opt on policy-core WASM binary
+        run: |
+          WASM_FILE=$(find target/wasm32-unknown-unknown/release -name "policy_core.wasm" | head -1)
+          if [ -n "$WASM_FILE" ]; then
+            echo "Optimising $WASM_FILE with wasm-opt -O3"
+            wasm-opt -O3 -o "${WASM_FILE%.wasm}_opt.wasm" "$WASM_FILE"
+            WASM_OPT_FILE="${WASM_FILE%.wasm}_opt.wasm"
+          else
+            echo "::warning::policy_core.wasm not found; skipping wasm-opt"
+            exit 0
+          fi
+
+          # ── WASM size check ────────────────────────────────────────────────
+          # Fail the build if the optimised WASM binary exceeds the budget.
+          WASM_SIZE_BYTES=$(wc -c < "$WASM_OPT_FILE")
+          WASM_SIZE_KB=$(( WASM_SIZE_BYTES / 1024 ))
+          echo "policy_core_opt.wasm size: ${WASM_SIZE_KB} KiB (${WASM_SIZE_BYTES} bytes)"
+
+          MAX_SIZE_KB=512
+          if [ "$WASM_SIZE_KB" -gt "$MAX_SIZE_KB" ]; then
+            echo "::error::WASM binary exceeds size budget: ${WASM_SIZE_KB} KiB > ${MAX_SIZE_KB} KiB"
+            exit 1
+          fi
+          echo "::notice::WASM size OK: ${WASM_SIZE_KB} KiB (budget: ${MAX_SIZE_KB} KiB)"
+

@@ -1,3 +1,10 @@
+// In no_std + alloc mode, bring heap types into scope.
+#[cfg(not(feature = "std"))]
+use alloc::{
+    string::{String, ToString},
+    vec::Vec,
+};
+
 use thiserror::Error;
 
 /// Version policy controls which AST versions are accepted.

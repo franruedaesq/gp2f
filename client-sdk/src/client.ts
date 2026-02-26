@@ -8,6 +8,13 @@ export type ErrorHandler = (err: Event) => void;
  */
 export type TokenHandler = (token: string, done: boolean) => void;
 
+/**
+ * Called when the server sends a RELOAD_REQUIRED message indicating the
+ * client's AST schema version is incompatible.  The application should
+ * reload its policy bundle and reconnect.
+ */
+export type ReloadRequiredHandler = (minRequiredVersion: string, reason: string) => void;
+
 export interface Gp2fClientOptions {
   url: string;
   /** Called with every inbound {@link ServerMessage}. */
@@ -23,6 +30,12 @@ export interface Gp2fClientOptions {
    * Enables token-by-token UI updates ("Time to First Token" UX pattern).
    */
   onToken?: TokenHandler;
+  /**
+   * Called when the server signals that the client's AST schema version is
+   * incompatible.  The client MUST reload its policy bundle before reconnecting.
+   * Defaults to a no-op if not provided.
+   */
+  onReloadRequired?: ReloadRequiredHandler;
   /**
    * Token-bucket capacity: maximum number of ops that may be sent in a burst.
    * Defaults to 10.
@@ -291,6 +304,12 @@ export class Gp2fClient {
         this.pauseUntil = Math.max(this.pauseUntil, Date.now() + settleMs);
       }
       this.scheduleDrain(this.pauseUntil - Date.now());
+    } else if (msg.type === "RELOAD_REQUIRED") {
+      // Server signals that our AST schema version is incompatible.
+      // Notify the application so it can reload the policy bundle.
+      this.options.onReloadRequired?.(msg.minRequiredVersion, msg.reason);
+      // Close the connection — we cannot continue with an incompatible schema.
+      this.disconnect();
     }
     this.options.onMessage(msg);
   }
