@@ -105,7 +105,10 @@ struct WorkflowActor {
 }
 
 impl WorkflowActor {
-    fn new(reconciler: Arc<Reconciler>, persistent_store: Arc<dyn PersistentStore>) -> (Self, ActorHandle) {
+    fn new(
+        reconciler: Arc<Reconciler>,
+        persistent_store: Arc<dyn PersistentStore>,
+    ) -> (Self, ActorHandle) {
         let (tx, rx) = mpsc::channel(ACTOR_CHANNEL_CAPACITY);
         let (broadcast_tx, _) = broadcast::channel(BROADCAST_CAPACITY);
         let actor = Self {
