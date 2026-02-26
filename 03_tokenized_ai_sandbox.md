@@ -42,3 +42,29 @@ We must treat the LLM interface as a hostile input vector, similar to a public A
 *   **Garak:** LLM vulnerability scanner (hallucination, data leakage, prompt injection).
 *   **PyTorch/ONNX Runtime:** For offline validation and retraining of the Vibe classification model.
 *   **Custom "Token Fuzzer":** A script to generate valid and invalid `tool_req` tokens at high volume to test the validator's throughput and correctness.
+
+## Mitigation Plan of Action
+
+### Phase 1: Latency & UX Optimization
+**Goal:** Mask LLM latency from the user.
+*   **Step 1.1:** Implement "Optimistic UI for AI." If the Vibe engine has high confidence (>90%), show a skeleton loader or a "Thinking..." indicator immediately.
+*   **Step 1.2:** Use "Streaming Responses." Process LLM tool calls as soon as the JSON token is complete, rather than waiting for the full generation to finish.
+*   **Testing:** Measure "Time to First Token" and "Time to UI Update" using `k6` + custom browser timing metrics.
+
+### Phase 2: Vibe Engine Lifecycle
+**Goal:** Keep the local classifier accurate without forcing full app updates.
+*   **Step 2.1:** Decouple the ONNX model from the main WASM bundle. Fetch `vibe_model_vX.onnx` from a CDN on startup, allowing hot-swapping of models.
+*   **Step 2.2:** Implement a "Feedback Loop." If the user dismisses an AI suggestion, log that interaction (anonymized) to retrain the model.
+*   **Testing:** Simulate "Model Drift" by changing UI patterns in tests and verifying that the feedback loop eventually triggers a model update recommendation.
+
+### Phase 3: Robust Token Management
+**Goal:** Prevent race conditions and state corruption.
+*   **Step 3.1:** Implement a "Token State Machine" backed by Redis (server) and IndexedDB (client). Tokens must have states: `ISSUED` -> `LOCKED` -> `CONSUMED` or `EXPIRED`.
+*   **Step 3.2:** Enforce "Atomic Consumption." The operation that uses a token must verify and invalidate it in the same transaction.
+*   **Testing:** Use the "Token Fuzzer" to attempt double-spending tokens and using expired tokens at the millisecond boundary.
+
+### Phase 4: Defense in Depth (Security)
+**Goal:** Mitigate prompt injection and jailbreaks.
+*   **Step 4.1:** Implement "Input Sanitization." Strip control characters and known attack patterns from user input *before* insertion into the prompt template.
+*   **Step 4.2:** Use a "Guardrail Model." A smaller, faster model (e.g., Llama-Guard) checks the user input and the LLM output for safety violations before execution.
+*   **Testing:** Integrate `Promptfoo` into the CI pipeline to run a regression suite of known jailbreak attempts against every prompt change.

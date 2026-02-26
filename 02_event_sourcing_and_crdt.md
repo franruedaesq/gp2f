@@ -41,3 +41,29 @@ To ensure the system is resilient to network failures, distributed concurrency i
 *   **k6:** For simulating concurrent user load and "syncing storms" where many clients reconnect simultaneously.
 *   **Yrs Fuzzers:** Leverage the built-in fuzzing tools within the Yrs crate (or custom wrappers) to test CRDT convergence under extreme conditions.
 *   **Spoofer CLI:** As specified, use the Spoofer CLI to inject malformed, replayed, or out-of-order ops to test server resilience and signature verification.
+
+## Mitigation Plan of Action
+
+### Phase 1: Reconciliation Robustness
+**Goal:** Eliminate "UI Jitter" and infinite reconciliation loops.
+*   **Step 1.1:** Formalize the "3-Way Merge" logic (Base, Local, Server) into a standalone, pure function that can be unit tested with thousands of edge cases.
+*   **Step 1.2:** Implement a "Settle Duration" in the UI. If a conflict occurs, pause optimistic updates for 500ms to allow the server state to stabilize before unlocking the UI.
+*   **Testing:** Use the "Spoofer CLI" to inject intentionally conflicting ops and verify that the client stabilizes within 2 round-trips.
+
+### Phase 2: CRDT Hygiene & Performance
+**Goal:** Prevent memory bloat from long-lived documents.
+*   **Step 2.1:** Implement "Tombstone Garbage Collection" in Yrs. Configure a policy to purge deleted items after a set retention period (e.g., 30 days).
+*   **Step 2.2:** Use "Snapshotting." Periodically (e.g., every 100 ops) save a flattened snapshot of the Yrs doc to S3/Blob storage, so new clients don't have to replay the entire history.
+*   **Testing:** Run a "Long-Haul" test where a document is edited 1 million times. Verify memory usage remains constant after GC runs.
+
+### Phase 3: Traffic Control & Backpressure
+**Goal:** Prevent "Thundering Herd" during reconnection.
+*   **Step 3.1:** Implement a Token Bucket rate limiter on the client's sync queue. Only release 50 ops/second to the server upon reconnection.
+*   **Step 3.2:** Add "Server-Side Backpressure" headers. If the server is overloaded, it responds with `Retry-After: N`. The client must respect this.
+*   **Testing:** Simulate a 10,000-op offline queue. Reconnect and verify the client trickles ops rather than flooding, and respects 429 responses.
+
+### Phase 4: Time Synchronization
+**Goal:** Mitigate clock skew issues.
+*   **Step 4.1:** Adopt Hybrid Logical Clocks (HLC). Use a combination of physical time and a logical counter to order events causally, independent of wall-clock skew.
+*   **Step 4.2:** On connect, the server sends its current time. The client calculates an offset and applies it to all local timestamps before signing.
+*   **Testing:** Set client system time to 1 year in the future. Verify `op_id`s are still ordered correctly relative to other clients using HLC/Offset.

@@ -42,3 +42,25 @@ To guarantee 100% evaluation parity between the browser and server environments,
 *   **wasm-bindgen-test:** For running tests in a headless browser environment to catch browser-specific WASM quirks.
 *   **wasmtime:** For running WASM tests in the server environment to ensure the server's Wasmtime instance matches the native build.
 *   **criterion:** For benchmarking evaluation latency to ensure the < 2ms target is met consistently.
+
+## Mitigation Plan of Action
+
+### Phase 1: Bundle Optimization & Performance Tuning
+**Goal:** Reduce initial load impact and serialization overhead.
+*   **Step 1.1:** Implement `wasm-opt` in the build pipeline to strip debug symbols and optimize binary size.
+*   **Step 1.2:** Use "Lazy Loading" for the policy engine. The UI shell loads first; the WASM blob fetches in the background.
+*   **Step 1.3:** Benchmark Protobuf vs. FlatBuffers. If Protobuf serialization > 2ms, migrate hot paths to FlatBuffers (Zero-Copy).
+*   **Testing:** Add a CI step that fails if `policy_engine.wasm` > 2MB. Use `criterion` to benchmark the JS<->WASM boundary cost.
+
+### Phase 2: Determinism Hardening
+**Goal:** Guarantee bit-for-bit parity across all platforms.
+*   **Step 2.1:** Enforce `no_std` compatibility (or strict WASI profiles) for core logic to prevent accidental usage of OS-specific behavior.
+*   **Step 2.2:** Replace standard math libraries with a deterministic fixed-point math crate (e.g., `fixed` or `rust_decimal`) if floating-point variance persists.
+*   **Step 2.3:** Normalize all `DateTime` inputs to Unix timestamps (i64) at the boundary. Disallow timezone-aware structs inside the AST evaluation logic.
+*   **Testing:** Run the "Oracle" proptest suite on CI against Linux (x86), macOS (ARM), and Windows agents.
+
+### Phase 3: Schema Evolution Safety
+**Goal:** Prevent client/server version mismatches from breaking sync.
+*   **Step 3.1:** Implement a "Schema Negotiation" handshake. Client sends `schema_version` on connect; Server responds with `reload_required` if too old.
+*   **Step 3.2:** Maintain a "compat-layer" in the server that can downcast new ASTs to older versions for read-only views if possible.
+*   **Testing:** Create a "Time Travel" test suite where a v1 Client tries to sync with a v2 Server, verifying the graceful failure/upgrade path.

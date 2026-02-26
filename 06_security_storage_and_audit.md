@@ -42,3 +42,29 @@ We must verify that the cryptographic promises hold true under attack and operat
 *   **OWASP ZAP / Burp Suite:** For intercepting traffic and attempting to replay or modify signed WebSocket frames.
 *   **KMS Simulator:** For testing key rotation and API failures without racking up AWS bills (e.g., using LocalStack).
 *   **Custom Audit Verifier:** A Rust tool that walks the event log, re-calculates the Blake3 hashes for every step, and asserts the chain integrity against the stored snapshots.
+
+## Mitigation Plan of Action
+
+### Phase 1: Robust Key Management
+**Goal:** Zero data loss during key rotation.
+*   **Step 1.1:** Implement "Lazy Re-encryption." When a key rotates, don't re-encrypt the entire DB immediately. Decrypt old records with the old key (retained temporarily) and re-encrypt with the new key on-the-fly or in a background worker.
+*   **Step 1.2:** Use "Key Wrapping." Encrypt the data encryption key (DEK) with a master key (KEK). Rotate the KEK frequently, but keep the DEK stable to avoid massive data re-writes.
+*   **Testing:** Simulate a key rotation mid-sync. Verify that offline changes signed with the old key are accepted within a grace period.
+
+### Phase 2: Storage Resilience
+**Goal:** Handle browser storage limits gracefully.
+*   **Step 2.1:** Implement "Eviction Policies." If storage > 80% quota, delete the oldest synced snapshots and non-essential logs.
+*   **Step 2.2:** Add "Persisted Storage" permission request. Ask the user for persistent storage permission to reduce browser eviction pressure.
+*   **Testing:** Fill IndexedDB to 100%. Verify that the app deletes old snapshots and continues to function for new operations without crashing.
+
+### Phase 3: Crypto Performance
+**Goal:** Keep the UI responsive during heavy encryption work.
+*   **Step 3.1:** Move all Crypto operations (hashing, signing, encrypting) to a `SharedWorker` or `ServiceWorker`. This keeps the main thread free for rendering.
+*   **Step 3.2:** Batch operations. Encrypt/Sign operations in groups of 10-50 to reduce IPC overhead between main thread and worker.
+*   **Testing:** Measure "Input Latency" while importing a large dataset (mass encryption). Assert latency stays under 16ms (60fps).
+
+### Phase 4: XSS Defense in Depth
+**Goal:** Prevent key exfiltration even if XSS occurs.
+*   **Step 4.1:** Mark `CryptoKey` as `extractable: false`. This ensures the raw key material cannot be viewed by JavaScript, only used for operations.
+*   **Step 4.2:** Implement strict CSP: `script-src 'self'; object-src 'none';`. Block inline scripts and unauthorized domains.
+*   **Testing:** Inject a script that attempts `window.crypto.subtle.exportKey(...)`. Verify it throws a security exception.

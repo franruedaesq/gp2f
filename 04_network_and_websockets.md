@@ -41,3 +41,29 @@ We need to prove the system can handle 10,000 concurrent users per tenant with <
 *   **Redis-benchmark:** To stress test the PubSub layer independently and tune buffer sizes.
 *   **Wireshark/tcpdump:** For analyzing packet-level behavior and TCP window sizing during reconnect storms.
 *   **Bloom Filter Analysis:** Custom scripts to verify the false positive rate and performance of the replay protection mechanism under load.
+
+## Mitigation Plan of Action
+
+### Phase 1: Robust Connection Handling
+**Goal:** Zero zombie connections and reliable heartbeat management.
+*   **Step 1.1:** Implement an "Actor Model" for WebSocket connections (one Actor per socket). Use `tokio::select!` to handle incoming messages, heartbeats, and shutdowns concurrently.
+*   **Step 1.2:** Enforce strict "Liveness Checks." If the client doesn't respond to a Ping within 5 seconds, forcefully terminate the connection to free resources.
+*   **Testing:** Use `toxiproxy` to simulate half-open TCP connections and verify the server detects and cleans them up within 10 seconds.
+
+### Phase 2: Execution Isolation (No Blocking)
+**Goal:** Prevent slow policy evaluations from freezing the event loop.
+*   **Step 2.1:** Implement a "dedicated blocking thread pool" (via `tokio::spawn_blocking`) for all Wasmtime calls.
+*   **Step 2.2:** Set strict "Fuel Limits" in Wasmtime. If an evaluation burns more than N instructions, trap immediately and reject the op.
+*   **Testing:** Send a "Poison Pill" op that loops infinitely. Verify that the Wasmtime instance traps within 5ms and other clients are unaffected.
+
+### Phase 3: Scaling the Message Bus
+**Goal:** Break the Redis throughput ceiling.
+*   **Step 3.1:** Optimize Redis usage. Use binary packing (Protobuf) for PubSub messages instead of JSON to reduce network bandwidth.
+*   **Step 3.2:** Investigate "Sharding" or switching to NATS JetStream if Redis CPU > 60% under load. Group tenants onto specific Redis clusters to localize traffic.
+*   **Testing:** Run `redis-benchmark` with the specific message payload size to determine the ops/sec saturation point.
+
+### Phase 4: Thundering Herd Protection
+**Goal:** Survive massive reconnect storms.
+*   **Step 4.1:** Implement "Client-Side Jitter." When a disconnect occurs, clients must wait `random(0, 5s) * 2^retry_count` before reconnecting.
+*   **Step 4.2:** Add "Admission Control" middleware. If pending connection queue > 1000, reject new handshakes immediately with 503 to preserve system stability.
+*   **Testing:** Disconnect 10k users, then allow reconnection. Verify that the server accepts them at a sustainable rate (e.g., 500/sec) without crashing.

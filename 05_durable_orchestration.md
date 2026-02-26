@@ -41,3 +41,29 @@ We must verify that the system is truly "durable" and can recover from catastrop
 *   **Chaos Mesh / Pumba:** For killing pods/processes in a Kubernetes/Docker environment to simulate hard failures.
 *   **Postgres Fault Injection:** Tools to simulate slow queries, connection drops, or deadlock scenarios in the database.
 *   **Custom Replay Tester:** A utility to download workflow histories from production and replay them against the current worker code to ensure backward compatibility.
+
+## Mitigation Plan of Action
+
+### Phase 1: Operational Simplicity
+**Goal:** Manage infrastructure complexity effectively.
+*   **Step 1.1:** Use "Temporal Cloud" or a managed K8s Helm chart for production to offload cluster management.
+*   **Step 1.2:** Implement strict "Workflow Linting" in CI. Fail builds if non-deterministic code (e.g., `std::time`, `rand`) is detected in workflow definitions.
+*   **Testing:** Run `temporal-lint` (custom or community tool) on every PR.
+
+### Phase 2: Latency Optimization
+**Goal:** Achieve < 16ms updates despite workflow overhead.
+*   **Step 2.1:** Use "Local Activities" for short-lived, low-risk operations to skip the full persistence round-trip.
+*   **Step 2.2:** Implement an "Async Ingestion" pattern. The API acknowledges the op immediately (after partial validation) and queues the Temporal workflow asynchronously.
+*   **Testing:** Benchmark End-to-End latency with and without Temporal. If overhead > 20ms, refactor the critical path to use the Async pattern.
+
+### Phase 3: Versioning Safety
+**Goal:** Seamless upgrades without breaking in-flight workflows.
+*   **Step 3.1:** Adopt the "Patching API" (`workflow.patched()`) for minor logic changes within the same workflow version.
+*   **Step 3.2:** For major changes, use "Worker Versioning" (Task Queues per version). Route new workflows to `queue-v2` while `queue-v1` drains old workflows.
+*   **Testing:** Create a "Replay Test Suite." Download history JSONs from production and replay them against the new worker code in CI to catch regression errors.
+
+### Phase 4: Database Scalability
+**Goal:** Prevent Temporal internal writes from choking the application DB.
+*   **Step 4.1:** Isolate Temporal's persistence. Use a dedicated Postgres instance (or Cassandra cluster) for Temporal history, separate from the application business data.
+*   **Step 4.2:** Tune Postgres `autovacuum` and WAL settings for high-write-throughput workloads typical of event sourcing.
+*   **Testing:** Load test with 500 workflows/sec. Monitor Postgres WAL generation rate and IOPS. Scale storage if IO wait > 10%.
