@@ -237,8 +237,7 @@ impl Evaluator {
                 }
 
                 if let Some(threshold_str) = &node.path {
-                    let threshold: Decimal =
-                        threshold_str.parse().unwrap_or(Decimal::ONE);
+                    let threshold: Decimal = threshold_str.parse().unwrap_or(Decimal::ONE);
                     let confidence: Decimal = resolve_path(state, "/vibe/confidence")
                         .and_then(|v| v.to_string().parse().ok())
                         .unwrap_or(Decimal::ZERO);
