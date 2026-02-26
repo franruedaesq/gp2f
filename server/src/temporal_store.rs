@@ -88,7 +88,11 @@ use crate::{
 #[async_trait]
 pub trait PersistentStore: Send + Sync {
     /// Append an event and return its sequence number.
-    async fn append(&self, msg: ClientMessage, outcome: OpOutcome) -> u64;
+    ///
+    /// Returns `Ok(seq)` on success or `Err(reason)` when the event could not
+    /// be persisted.  Callers **must** treat `Err` as a signal that the event
+    /// was not durably stored and take appropriate action (e.g. log, alert).
+    async fn append(&self, msg: ClientMessage, outcome: OpOutcome) -> Result<u64, String>;
 
     /// Return all events for a partition key.
     async fn events_for(&self, key: &str) -> Vec<StoredEvent>;
@@ -121,8 +125,8 @@ impl Default for InMemoryStore {
 
 #[async_trait]
 impl PersistentStore for InMemoryStore {
-    async fn append(&self, msg: ClientMessage, outcome: OpOutcome) -> u64 {
-        self.inner.append(msg, outcome)
+    async fn append(&self, msg: ClientMessage, outcome: OpOutcome) -> Result<u64, String> {
+        Ok(self.inner.append(msg, outcome))
     }
 
     async fn events_for(&self, key: &str) -> Vec<StoredEvent> {
@@ -397,7 +401,7 @@ pub enum TemporalError {
 
 #[async_trait]
 impl PersistentStore for TemporalStore {
-    async fn append(&self, msg: ClientMessage, outcome: OpOutcome) -> u64 {
+    async fn append(&self, msg: ClientMessage, outcome: OpOutcome) -> Result<u64, String> {
         let key = crate::event_store::EventStore::partition_key(&msg);
 
         if *self.connected.lock().await {
@@ -410,7 +414,7 @@ impl PersistentStore for TemporalStore {
         // Fallback counter used for the synchronous response seq number.
         // Once the Temporal SDK is fully wired in, replace this with the
         // Temporal history event ID returned by the signal call.
-        self.fallback.append(msg, outcome)
+        Ok(self.fallback.append(msg, outcome))
     }
 
     async fn events_for(&self, key: &str) -> Vec<StoredEvent> {
@@ -495,7 +499,7 @@ mod tests {
     async fn in_memory_store_append_and_retrieve() {
         let store = InMemoryStore::new();
         let seq = store.append(msg("op-1"), OpOutcome::Accepted).await;
-        assert_eq!(seq, 0);
+        assert_eq!(seq, Ok(0));
         let events = store.events_for("t1:wf1:i1").await;
         assert_eq!(events.len(), 1);
         assert_eq!(events[0].message.op_id, "op-1");
@@ -514,7 +518,7 @@ mod tests {
         let store = TemporalStore::new("localhost:7233", "gp2f-prod");
         assert!(!store.is_connected().await);
         let seq = store.append(msg("op-1"), OpOutcome::Accepted).await;
-        assert_eq!(seq, 0);
+        assert_eq!(seq, Ok(0));
     }
 
     #[tokio::test]
@@ -533,7 +537,7 @@ mod tests {
             .append(msg("op-temporal-1"), OpOutcome::Accepted)
             .await;
         // Fallback counter is used while SDK is a stub.
-        assert_eq!(seq, 0);
+        assert_eq!(seq, Ok(0));
         let events = store.events_for("t1:wf1:i1").await;
         assert_eq!(events.len(), 1);
     }
