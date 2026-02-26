@@ -8,3 +8,4 @@ pkg/
 __pycache__
 .env
 tests/promptfoo-results.json
+*.node

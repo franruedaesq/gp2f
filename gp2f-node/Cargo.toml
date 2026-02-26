@@ -1,0 +1,25 @@
+[package]
+name = "gp2f-node"
+version.workspace = true
+edition.workspace = true
+authors.workspace = true
+license.workspace = true
+description = "Native Node.js (N-API) bindings for the GP2F policy engine"
+
+[lib]
+crate-type = ["cdylib"]
+name = "gp2f_node"
+
+[dependencies]
+napi = { version = "2", default-features = false, features = ["napi8", "async", "tokio_rt", "serde-json"] }
+napi-derive = "2"
+policy-core = { path = "../policy-core" }
+serde.workspace = true
+serde_json.workspace = true
+thiserror.workspace = true
+tokio = { version = "1", features = ["full"] }
+axum = { version = "0.7" }
+tower-http = { version = "0.5", features = ["trace"] }
+
+[build-dependencies]
+napi-build = "1"
