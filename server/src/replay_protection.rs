@@ -10,8 +10,19 @@
 //! Capacity choices (ADR-003):
 //! - `WINDOW` = 10 000 op_ids per client (exact)
 //! - Bloom filter: 10 000 bits per filter word set, ~0.1 % FPR after 5 000 items
+//!
+//! ## Distributed deployment (Redis)
+//!
+//! When the `redis-broadcast` Cargo feature is enabled and `REDIS_URL` is set,
+//! [`build_replay_store`] returns a [`RedisReplayGuard`] backed by Redis Sets.
+//!
+//! Key layout: `replay:{client_id}` – Redis Set of seen `op_id`s.
+//! TTL is refreshed on every insert (`EXPIRE replay:{client_id} {window_secs}`).
+//! Uses `SISMEMBER` for duplicate checks and `SADD` + `EXPIRE` for insertion,
+//! providing cross-replica duplicate detection without shared in-process state.
 
 use std::collections::{HashMap, HashSet, VecDeque};
+use std::sync::Arc;
 
 /// Size of the exact window (zero false-negatives within this many recent ops).
 pub const WINDOW: usize = 10_000;
@@ -159,6 +170,160 @@ impl ReplayGuard {
 impl Default for ReplayGuard {
     fn default() -> Self {
         Self::new()
+    }
+}
+
+// ── async replay store trait ──────────────────────────────────────────────────
+
+/// Type alias for a thread-safe, dynamically dispatched replay store.
+pub type DynReplayStore = Arc<dyn ReplayStore>;
+
+/// Async replay-protection trait.
+///
+/// Implemented by [`std::sync::Mutex<ReplayGuard>`] (in-memory, single-replica)
+/// and by [`RedisReplayGuard`] (distributed, requires `redis-broadcast` feature).
+#[async_trait::async_trait]
+pub trait ReplayStore: Send + Sync + 'static {
+    /// Returns `true` if `op_id` is a (probable) duplicate for `client_id`.
+    /// If not a duplicate, records the op_id and returns `false`.
+    async fn check_and_insert(&self, client_id: &str, op_id: &str) -> bool;
+}
+
+/// Wrap the synchronous [`ReplayGuard`] behind the async [`ReplayStore`] trait.
+#[async_trait::async_trait]
+impl ReplayStore for std::sync::Mutex<ReplayGuard> {
+    async fn check_and_insert(&self, client_id: &str, op_id: &str) -> bool {
+        self.lock().unwrap().check_and_insert(client_id, op_id)
+    }
+}
+
+/// Build the best available replay store at startup.
+///
+/// When `REDIS_URL` is set and the `redis-broadcast` feature is enabled,
+/// connects to Redis; otherwise falls back to the in-process replay guard.
+pub async fn build_replay_store() -> DynReplayStore {
+    #[cfg(feature = "redis-broadcast")]
+    if let Ok(url) = std::env::var("REDIS_URL") {
+        match RedisReplayGuard::connect(&url) {
+            Ok(guard) => {
+                tracing::info!(url = %url, "Redis replay protection connected");
+                return Arc::new(guard);
+            }
+            Err(e) => {
+                tracing::warn!("Redis replay guard failed ({e}); falling back to in-memory");
+            }
+        }
+    }
+    tracing::info!("Using in-memory replay protection");
+    Arc::new(std::sync::Mutex::new(ReplayGuard::new()))
+}
+
+// ── Redis replay guard ────────────────────────────────────────────────────────
+
+/// Lua script for atomic replay check-and-insert.
+///
+/// KEYS[1] = `replay:{client_id}`
+/// ARGV[1] = `op_id`, ARGV[2] = `window_ttl_secs`
+///
+/// Returns: `1` if duplicate, `0` if new (op recorded atomically).
+#[cfg(feature = "redis-broadcast")]
+const REPLAY_LUA: &str = r#"
+local key = KEYS[1]
+local op_id = ARGV[1]
+local ttl = tonumber(ARGV[2])
+if redis.call('SISMEMBER', key, op_id) == 1 then
+    return 1
+end
+redis.call('SADD', key, op_id)
+redis.call('EXPIRE', key, ttl)
+return 0
+"#;
+
+/// Window TTL for the per-client Redis Sets (1 hour).
+///
+/// After this many seconds of inactivity the set expires automatically,
+/// preventing unbounded memory growth on the Redis server.
+#[cfg(feature = "redis-broadcast")]
+pub const REPLAY_WINDOW_SECS: u64 = 3_600;
+
+/// Redis-backed replay-protection store.
+///
+/// Uses `SISMEMBER replay:{client_id} {op_id}` for duplicate checks and
+/// `SADD replay:{client_id} {op_id}` + `EXPIRE` for insertion.
+///
+/// The per-client Set TTL is refreshed on every insert so it acts as a
+/// sliding-window of `REPLAY_WINDOW_SECS` seconds.  Across all replicas,
+/// every `check_and_insert` call hits the same Redis shard, providing
+/// consistent cross-replica duplicate detection.
+#[cfg(feature = "redis-broadcast")]
+pub struct RedisReplayGuard {
+    client: redis::Client,
+    /// Window TTL in seconds (refreshed on every insert).
+    window_secs: u64,
+}
+
+#[cfg(feature = "redis-broadcast")]
+impl RedisReplayGuard {
+    /// Connect to Redis and return a new replay guard.
+    pub fn connect(redis_url: &str) -> Result<Self, redis::RedisError> {
+        let client = redis::Client::open(redis_url)?;
+        Ok(Self {
+            client,
+            window_secs: REPLAY_WINDOW_SECS,
+        })
+    }
+
+    /// Create with a custom window TTL (useful for testing).
+    pub fn with_window(client: redis::Client, window_secs: u64) -> Self {
+        Self {
+            client,
+            window_secs,
+        }
+    }
+
+    fn set_key(client_id: &str) -> String {
+        format!("replay:{client_id}")
+    }
+}
+
+#[cfg(feature = "redis-broadcast")]
+#[async_trait::async_trait]
+impl ReplayStore for RedisReplayGuard {
+    async fn check_and_insert(&self, client_id: &str, op_id: &str) -> bool {
+        let key = Self::set_key(client_id);
+        let mut conn = match self.client.get_multiplexed_async_connection().await {
+            Ok(c) => c,
+            Err(e) => {
+                tracing::warn!(
+                    client_id = %client_id,
+                    error = %e,
+                    "Redis replay guard connection error; allowing op (fail-open)"
+                );
+                return false; // fail open: allow op if Redis is unreachable
+            }
+        };
+
+        // Atomic check-and-insert via Lua: SISMEMBER + SADD + EXPIRE.
+        let result: i64 = match redis::Script::new(REPLAY_LUA)
+            .key(&key)
+            .arg(op_id)
+            .arg(self.window_secs)
+            .invoke_async(&mut conn)
+            .await
+        {
+            Ok(v) => v,
+            Err(e) => {
+                tracing::warn!(
+                    client_id = %client_id,
+                    op_id = %op_id,
+                    error = %e,
+                    "Redis replay guard script error; allowing op (fail-open)"
+                );
+                return false; // fail open
+            }
+        };
+
+        result == 1 // 1 = duplicate, 0 = new
     }
 }
 

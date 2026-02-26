@@ -20,7 +20,7 @@ use gp2f_server::{
     reconciler::Reconciler,
     redis_broadcast::{build_broadcaster, DynBroadcaster},
     temporal_store::{InMemoryStore, PersistentStore, TemporalStore},
-    token_service::{MintRequest, RedeemRequest, TokenService},
+    token_service::{build_token_store, DynTokenStore, MintRequest, RedeemRequest},
     tool_gating::ToolGatingService,
     wasm_engine::WasmtimeEngine,
     wire::{AgentProposeRequest, AiFeedbackRequest, ClientMessage, HelloMessage, ServerMessage},
@@ -30,7 +30,7 @@ use policy_core::evaluator::hash_state;
 #[derive(Clone)]
 struct AppState {
     reconciler: Arc<Reconciler>,
-    token_service: Arc<TokenService>,
+    token_service: DynTokenStore,
     actor_registry: Arc<ActorRegistry>,
     /// Broadcaster (Redis PubSub or in-process fallback).
     broadcaster: DynBroadcaster,
@@ -114,6 +114,9 @@ async fn main() {
     // ── Redis / in-process broadcaster ────────────────────────────────────
     let broadcaster = build_broadcaster().await;
 
+    // ── Token store (Redis or in-memory) ──────────────────────────────────
+    let token_service = build_token_store().await;
+
     // ── Op-ID middleware (ed25519 validation) ─────────────────────────────
     // Prefer KEYS_JSON (env-var key provider for K8s Secrets / production).
     // Fall back to an empty in-memory store (dev/unauthenticated mode).
@@ -127,6 +130,11 @@ async fn main() {
 
     // ── LLM provider (OpenAI / Anthropic / Groq / Mock) ───────────────────
     let llm_provider: Arc<dyn LlmProvider> = Arc::from(build_provider());
+
+    // ── Redis actor coordinator (multi-replica split-brain detection) ─────
+    #[cfg(feature = "redis-broadcast")]
+    let actor_coordinator = gp2f_server::actor::RedisActorCoordinator::from_env()
+        .map(std::sync::Arc::new);
 
     // ── Async ingestion queue (Phase 2.2 – low-latency /op/async endpoint) ─
     let ingestion_buffer: usize = std::env::var("INGESTION_QUEUE_SIZE")
@@ -150,10 +158,22 @@ async fn main() {
         }
     });
 
+    // Build the main actor registry, attaching the Redis coordinator when available.
+    let actor_registry = {
+        let base = ActorRegistry::with_store(event_store.clone());
+        #[cfg(feature = "redis-broadcast")]
+        let base = if let Some(coord) = actor_coordinator {
+            base.with_coordinator(coord)
+        } else {
+            base
+        };
+        Arc::new(base)
+    };
+
     let state = AppState {
         reconciler: Arc::new(Reconciler::new()),
-        token_service: Arc::new(TokenService::new()),
-        actor_registry: Arc::new(ActorRegistry::with_store(event_store.clone())),
+        token_service,
+        actor_registry,
         broadcaster,
         llm_provider,
         tool_gating: Arc::new(ToolGatingService::new()),
@@ -310,7 +330,7 @@ async fn token_mint_handler(
     State(state): State<AppState>,
     Json(req): Json<MintRequest>,
 ) -> impl IntoResponse {
-    let resp = state.token_service.mint(req);
+    let resp = state.token_service.mint(req).await;
     (StatusCode::OK, Json(resp))
 }
 
@@ -318,7 +338,7 @@ async fn token_redeem_handler(
     State(state): State<AppState>,
     Json(req): Json<RedeemRequest>,
 ) -> impl IntoResponse {
-    match state.token_service.redeem(req) {
+    match state.token_service.redeem(req).await {
         Ok(resp) => (
             StatusCode::OK,
             Json(serde_json::to_value(resp).unwrap_or_else(|_| serde_json::json!({}))),
