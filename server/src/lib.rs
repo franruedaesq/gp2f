@@ -12,6 +12,8 @@ pub mod llm_audit;
 pub mod llm_provider;
 pub mod middleware;
 pub mod pilot_workflows;
+#[cfg(feature = "postgres-store")]
+pub mod postgres_store;
 pub mod rate_limit;
 pub mod rbac;
 pub mod reconciler;

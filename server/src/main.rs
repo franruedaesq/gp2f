@@ -15,7 +15,7 @@ use gp2f_server::{
     async_ingestion::AsyncIngestionQueue,
     compat,
     llm_provider::{build_provider, LlmMessage, LlmProvider, LlmRequest},
-    middleware::{InMemoryPublicKeyStore, OpIdLayer},
+    middleware::{EnvVarKeyProvider, InMemoryPublicKeyStore, OpIdLayer, PublicKeyStore},
     rate_limit::AiRateLimiter,
     reconciler::Reconciler,
     redis_broadcast::{build_broadcaster, DynBroadcaster},
@@ -46,12 +46,26 @@ struct AppState {
 
 #[tokio::main]
 async fn main() {
-    tracing_subscriber::registry()
-        .with(tracing_subscriber::EnvFilter::new(
-            std::env::var("RUST_LOG").unwrap_or_else(|_| "info".into()),
-        ))
-        .with(tracing_subscriber::fmt::layer())
-        .init();
+    // ── Structured logging (JSON when LOG_FORMAT=json is set) ──────────────
+    let use_json_logs = std::env::var("LOG_FORMAT")
+        .map(|v| v.eq_ignore_ascii_case("json"))
+        .unwrap_or(false);
+
+    let env_filter = tracing_subscriber::EnvFilter::new(
+        std::env::var("RUST_LOG").unwrap_or_else(|_| "info".into()),
+    );
+
+    if use_json_logs {
+        tracing_subscriber::registry()
+            .with(env_filter)
+            .with(tracing_subscriber::fmt::layer().json())
+            .init();
+    } else {
+        tracing_subscriber::registry()
+            .with(env_filter)
+            .with(tracing_subscriber::fmt::layer())
+            .init();
+    }
 
     // ── Wasmtime policy engine (optional) ──────────────────────────────────
     let wasm_path =
@@ -62,9 +76,30 @@ async fn main() {
     }
 
     // ── Persistent event store ─────────────────────────────────────────────
-    let event_store: Arc<dyn PersistentStore> = if let Ok(endpoint) =
-        std::env::var("TEMPORAL_ENDPOINT")
+    let event_store: Arc<dyn PersistentStore> = if let Ok(db_url) =
+        std::env::var("DATABASE_URL")
     {
+        #[cfg(feature = "postgres-store")]
+        {
+            use gp2f_server::postgres_store::PostgresStore;
+            match PostgresStore::new(&db_url).await {
+                Ok(store) => {
+                    tracing::info!("Postgres event store connected");
+                    Arc::new(store)
+                }
+                Err(e) => {
+                    tracing::warn!("Postgres connect failed ({e}); using in-memory fallback");
+                    Arc::new(InMemoryStore::new())
+                }
+            }
+        }
+        #[cfg(not(feature = "postgres-store"))]
+        {
+            let _ = db_url;
+            tracing::warn!("DATABASE_URL set but postgres-store feature is disabled; using in-memory fallback");
+            Arc::new(InMemoryStore::new())
+        }
+    } else if let Ok(endpoint) = std::env::var("TEMPORAL_ENDPOINT") {
         let namespace = std::env::var("TEMPORAL_NAMESPACE").unwrap_or_else(|_| "gp2f-prod".into());
         let store = TemporalStore::new(endpoint.clone(), namespace);
         if let Err(e) = store.connect().await {
@@ -72,7 +107,7 @@ async fn main() {
         }
         Arc::new(store)
     } else {
-        tracing::info!("TEMPORAL_ENDPOINT not set; using in-memory event store");
+        tracing::info!("DATABASE_URL not set; using in-memory event store");
         Arc::new(InMemoryStore::new())
     };
 
@@ -80,8 +115,15 @@ async fn main() {
     let broadcaster = build_broadcaster().await;
 
     // ── Op-ID middleware (ed25519 validation) ─────────────────────────────
-    // In production, populate key_store from Redis or a secrets manager.
-    let key_store = Arc::new(InMemoryPublicKeyStore::new());
+    // Prefer KEYS_JSON (env-var key provider for K8s Secrets / production).
+    // Fall back to an empty in-memory store (dev/unauthenticated mode).
+    let key_store: Arc<dyn PublicKeyStore> =
+        if std::env::var("KEYS_JSON").is_ok() {
+            tracing::info!("Loading public keys from KEYS_JSON");
+            Arc::new(EnvVarKeyProvider::from_env())
+        } else {
+            Arc::new(InMemoryPublicKeyStore::new())
+        };
     let op_id_layer = OpIdLayer::new(key_store);
 
     // ── LLM provider (OpenAI / Anthropic / Groq / Mock) ───────────────────
