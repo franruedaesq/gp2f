@@ -90,16 +90,37 @@ impl PostgresStore {
     }
 }
 
+// ── advisory lock helpers ─────────────────────────────────────────────────────
+
+/// Derive a stable i64 advisory lock key from a string partition key using
+/// FNV-1a 64-bit hash (offset basis 14695981039346656037, prime 1099511628211,
+/// as per https://www.isthe.com/chongo/tech/comp/fnv/#FNV-1a).
+///
+/// FNV-1a is chosen for its simplicity, speed, and good avalanche properties.
+/// Postgres `pg_advisory_xact_lock` accepts a single `bigint` (i64), so the
+/// 64-bit FNV result is reinterpreted as i64 via bitcast.  Different partition
+/// keys will produce different lock keys with overwhelming probability.
+fn advisory_lock_key(partition_key: &str) -> i64 {
+    let mut hash: u64 = 14_695_981_039_346_656_037;
+    for byte in partition_key.bytes() {
+        hash ^= u64::from(byte);
+        hash = hash.wrapping_mul(1_099_511_628_211);
+    }
+    // Fold into i64 by reinterpreting the bit pattern.
+    hash as i64
+}
+
 #[async_trait]
 impl PersistentStore for PostgresStore {
     /// Append an event to the log and return its sequence number.
     ///
-    /// Uses a single `INSERT … RETURNING seq` statement so the database
-    /// generates the sequence number atomically, eliminating the TOCTOU race
-    /// between a `SELECT MAX` and a subsequent `INSERT`.  The `seq` column is
-    /// backed by a `BIGSERIAL`-style sequence (see
-    /// `migrations/20240523_auto_seq.sql`), so no manual sequence calculation
-    /// is needed.
+    /// Uses a per-instance PostgreSQL advisory lock (`pg_advisory_xact_lock`)
+    /// to serialise concurrent writes from multiple actors to the same
+    /// `(tenant_id, workflow_id, instance_id)` partition, preventing interleaved
+    /// events and broken causal chains when split-brain actors race to write.
+    ///
+    /// The advisory lock is held for the duration of the transaction so the
+    /// sequence number is assigned atomically and the causal chain is preserved.
     ///
     /// Returns `Ok(seq)` on success or `Err(reason)` when the event could not
     /// be persisted (serialisation failure or fatal DB error).
@@ -122,6 +143,30 @@ impl PersistentStore for PostgresStore {
 
         let hlc_ts = self.hlc.now() as i64;
 
+        // Derive a stable 64-bit advisory lock key from the partition key so
+        // that concurrent writes for the same (tenant, workflow, instance)
+        // triple are serialised by the database.
+        let partition_key = Self::partition_key(&msg);
+        let lock_key = advisory_lock_key(&partition_key);
+
+        let mut tx = self.pool.begin().await.map_err(|e| {
+            tracing::error!(op_id = %msg.op_id, "postgres append: begin transaction failed: {e}");
+            e.to_string()
+        })?;
+
+        // Acquire per-instance advisory lock for the duration of the transaction.
+        // `pg_advisory_xact_lock` is automatically released at transaction end
+        // (commit or rollback) – no explicit unlock is needed.
+        // This serialises all writes to the same instance, preserving causal order.
+        sqlx::query("SELECT pg_advisory_xact_lock($1)")
+            .bind(lock_key)
+            .execute(&mut *tx)
+            .await
+            .map_err(|e| {
+                tracing::error!(op_id = %msg.op_id, "postgres append: advisory lock failed: {e}");
+                e.to_string()
+            })?;
+
         let row = sqlx::query(
             "INSERT INTO event_log \
              (tenant_id, workflow_id, instance_id, op_id, ingested_at, hlc_ts, outcome, payload) \
@@ -135,10 +180,15 @@ impl PersistentStore for PostgresStore {
         .bind(hlc_ts)
         .bind(outcome_str)
         .bind(&message_json)
-        .fetch_one(&self.pool)
+        .fetch_one(&mut *tx)
         .await
         .map_err(|e| {
             tracing::error!(op_id = %msg.op_id, "postgres append: insert failed: {e}");
+            e.to_string()
+        })?;
+
+        tx.commit().await.map_err(|e| {
+            tracing::error!(op_id = %msg.op_id, "postgres append: commit failed: {e}");
             e.to_string()
         })?;
 

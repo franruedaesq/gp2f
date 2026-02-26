@@ -220,10 +220,16 @@ pub async fn build_replay_store() -> DynReplayStore {
 
 // ── Redis replay guard ────────────────────────────────────────────────────────
 
-/// Lua script for atomic replay check-and-insert.
+/// Lua script for atomic replay check-and-insert using a Sorted Set.
 ///
 /// KEYS[1] = `replay:{client_id}`
-/// ARGV[1] = `op_id`, ARGV[2] = `window_ttl_secs`
+/// ARGV[1] = `op_id`, ARGV[2] = `window_ttl_secs`, ARGV[3] = current Unix timestamp (secs)
+///
+/// The sorted set uses the insertion timestamp as the score.  On each call:
+/// 1. Remove all members whose score is older than `now - ttl` (sliding window eviction).
+/// 2. Check for the `op_id` member.
+/// 3. If new, add it with score = now.
+/// 4. Refresh the key TTL so inactive clients eventually get their key expired.
 ///
 /// Returns: `1` if duplicate, `0` if new (op recorded atomically).
 #[cfg(feature = "redis-broadcast")]
@@ -231,10 +237,13 @@ const REPLAY_LUA: &str = r#"
 local key = KEYS[1]
 local op_id = ARGV[1]
 local ttl = tonumber(ARGV[2])
-if redis.call('SISMEMBER', key, op_id) == 1 then
+local now = tonumber(ARGV[3])
+local cutoff = now - ttl
+redis.call('ZREMRANGEBYSCORE', key, '-inf', cutoff)
+if redis.call('ZSCORE', key, op_id) then
     return 1
 end
-redis.call('SADD', key, op_id)
+redis.call('ZADD', key, now, op_id)
 redis.call('EXPIRE', key, ttl)
 return 0
 "#;
@@ -248,13 +257,19 @@ pub const REPLAY_WINDOW_SECS: u64 = 3_600;
 
 /// Redis-backed replay-protection store.
 ///
-/// Uses `SISMEMBER replay:{client_id} {op_id}` for duplicate checks and
-/// `SADD replay:{client_id} {op_id}` + `EXPIRE` for insertion.
+/// Uses a Sorted Set keyed `replay:{client_id}` where each member is an
+/// `op_id` and its score is the Unix timestamp (seconds) at which the op was
+/// received.  On every insert:
+/// 1. Members older than `window_secs` are evicted with `ZREMRANGEBYSCORE`
+///    (sliding-window eviction), bounding the set size to at most
+///    `window_secs` worth of op_ids rather than all op_ids ever sent.
+/// 2. `ZSCORE` is used for the duplicate check (O(log N)).
+/// 3. `ZADD` records the new op with the current timestamp as the score.
+/// 4. `EXPIRE` is refreshed so inactive client keys are eventually deleted.
 ///
-/// The per-client Set TTL is refreshed on every insert so it acts as a
-/// sliding-window of `REPLAY_WINDOW_SECS` seconds.  Across all replicas,
-/// every `check_and_insert` call hits the same Redis shard, providing
-/// consistent cross-replica duplicate detection.
+/// Across all replicas, every `check_and_insert` call hits the same Redis
+/// shard, providing consistent cross-replica duplicate detection without
+/// unbounded memory growth.
 #[cfg(feature = "redis-broadcast")]
 pub struct RedisReplayGuard {
     client: redis::Client,
@@ -303,11 +318,28 @@ impl ReplayStore for RedisReplayGuard {
             }
         };
 
-        // Atomic check-and-insert via Lua: SISMEMBER + SADD + EXPIRE.
+        // Current Unix timestamp in seconds used as the ZSET member score.
+        // Log a warning if the system clock appears to be set before the Unix epoch.
+        let now_secs: u64 = match std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+        {
+            Ok(d) => d.as_secs(),
+            Err(e) => {
+                tracing::warn!(
+                    error = %e,
+                    "Redis replay guard: system clock is before Unix epoch; \
+                     replay protection may evict entries prematurely"
+                );
+                0
+            }
+        };
+
+        // Atomic check-and-insert via Lua: ZREMRANGEBYSCORE (evict old) + ZSCORE + ZADD + EXPIRE.
         let result: i64 = match redis::Script::new(REPLAY_LUA)
             .key(&key)
             .arg(op_id)
             .arg(self.window_secs)
+            .arg(now_secs)
             .invoke_async(&mut conn)
             .await
         {
