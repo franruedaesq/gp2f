@@ -383,7 +383,9 @@ mod tests {
         let store = TemporalStore::new("localhost:7233", "gp2f-prod");
         store.connect().await.unwrap();
         // Route to Temporal (stub logs; no real Temporal cluster available).
-        let seq = store.append(msg("op-temporal-1"), OpOutcome::Accepted).await;
+        let seq = store
+            .append(msg("op-temporal-1"), OpOutcome::Accepted)
+            .await;
         // Fallback counter is used while SDK is a stub.
         assert_eq!(seq, 0);
         let events = store.events_for("t1:wf1:i1").await;

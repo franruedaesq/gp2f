@@ -104,6 +104,39 @@ pub enum ServerMessage {
     Reject(RejectResponse),
 }
 
+/// Request body for `POST /agent/propose`.
+///
+/// The caller supplies the tenant/workflow/instance identifiers and an optional
+/// user-facing prompt.  The server uses the current workflow state to decide
+/// which tools the LLM may see, calls the configured LLM provider, and submits
+/// the resulting op through the normal reconciliation pipeline.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct AgentProposeRequest {
+    /// Tenant that owns the workflow instance.
+    #[serde(default)]
+    pub tenant_id: String,
+    /// Workflow definition identifier.
+    #[serde(default)]
+    pub workflow_id: String,
+    /// Specific workflow instance identifier.
+    #[serde(default)]
+    pub instance_id: String,
+    /// AST version string (used to gate tool visibility and audit the trace).
+    #[serde(default = "default_ast_version")]
+    pub ast_version: String,
+    /// Optional natural-language prompt from the user or an upstream system.
+    #[serde(default)]
+    pub prompt: Option<String>,
+    /// Optional behavioral signal from the on-device Semantic Vibe Engine.
+    #[serde(default)]
+    pub vibe: Option<VibeVector>,
+}
+
+fn default_ast_version() -> String {
+    "1.0.0".to_owned()
+}
+
 // ── conversions ───────────────────────────────────────────────────────────────
 
 impl From<policy_core::FieldStrategy> for FieldConflictStrategy {

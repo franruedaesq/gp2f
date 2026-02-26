@@ -268,8 +268,14 @@ mod tests {
         let mut rx1 = broadcaster.subscribe("wf1");
         let mut rx2 = broadcaster.subscribe("wf1");
         broadcaster.publish("wf1", accept("op-2"));
-        assert!(matches!(rx1.recv().await.unwrap(), ServerMessage::Accept(_)));
-        assert!(matches!(rx2.recv().await.unwrap(), ServerMessage::Accept(_)));
+        assert!(matches!(
+            rx1.recv().await.unwrap(),
+            ServerMessage::Accept(_)
+        ));
+        assert!(matches!(
+            rx2.recv().await.unwrap(),
+            ServerMessage::Accept(_)
+        ));
     }
 
     #[tokio::test]
