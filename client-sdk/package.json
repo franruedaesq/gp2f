@@ -4,12 +4,27 @@
   "description": "GP2F client SDK – reconciliation UX components and WebSocket client",
   "main": "dist/index.js",
   "types": "dist/index.d.ts",
-  "files": ["dist", "src"],
+  "files": [
+    "dist",
+    "src"
+  ],
+  "exports": {
+    ".": {
+      "types": "./dist/index.d.ts",
+      "import": "./dist/index.js",
+      "default": "./dist/index.js"
+    }
+  },
   "scripts": {
     "build": "tsc",
     "test": "jest --passWithNoTests"
   },
-  "keywords": ["gp2f", "crdt", "reconciliation", "optimistic-ui"],
+  "keywords": [
+    "gp2f",
+    "crdt",
+    "reconciliation",
+    "optimistic-ui"
+  ],
   "license": "MIT",
   "peerDependencies": {
     "react": ">=18.0.0",
