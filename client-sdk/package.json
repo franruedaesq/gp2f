@@ -1,6 +1,6 @@
 {
   "name": "@gp2f/client-sdk",
-  "version": "1.0.0",
+  "version": "1.0.1",
   "description": "GP2F client SDK – reconciliation UX components and WebSocket client",
   "main": "dist/index.js",
   "types": "dist/index.d.ts",
