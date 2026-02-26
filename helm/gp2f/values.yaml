@@ -58,7 +58,7 @@ server:
 
   livenessProbe:
     httpGet:
-      path: /health
+      path: /livez
       port: 3000
     initialDelaySeconds: 10
     periodSeconds: 15

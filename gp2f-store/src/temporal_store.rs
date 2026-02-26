@@ -127,6 +127,13 @@ pub trait PersistentStore: Send + Sync {
 
     /// Total number of events across all partitions.
     async fn total_count(&self) -> usize;
+
+    /// Return `true` when the backing store is reachable and able to accept
+    /// writes.  Used by the `/health` readiness endpoint.
+    ///
+    /// Implementations should perform the cheapest possible connectivity check
+    /// (e.g. `SELECT 1` for Postgres) rather than a full query.
+    async fn is_alive(&self) -> bool;
 }
 
 // ── InMemoryStore ─────────────────────────────────────────────────────────────
@@ -167,6 +174,10 @@ impl PersistentStore for InMemoryStore {
 
     async fn total_count(&self) -> usize {
         self.inner.total_count()
+    }
+
+    async fn is_alive(&self) -> bool {
+        true
     }
 }
 
@@ -517,6 +528,10 @@ impl PersistentStore for TemporalStore {
 
     async fn total_count(&self) -> usize {
         self.fallback.total_count()
+    }
+
+    async fn is_alive(&self) -> bool {
+        self.is_connected().await
     }
 }
 

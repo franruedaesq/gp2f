@@ -230,10 +230,11 @@ pub async fn build_broadcaster() -> DynBroadcaster {
 ///     ).await?;
 /// ws_sender.send(Message::Text(serde_json::to_string(&state)?)).await?;
 /// ```
+#[allow(dead_code)]
 pub async fn temporal_fallback_reconcile(workflow_id: &str) -> Option<ServerMessage> {
     tracing::debug!(
         workflow_id = %workflow_id,
-        "Temporal fallback reconcile (stub; replace with SDK call)"
+        "Temporal fallback reconcile (not yet implemented; requires temporal-client SDK)"
     );
     // Production: query Temporal for the latest state and return it.
     None
