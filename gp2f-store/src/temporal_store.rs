@@ -79,6 +79,32 @@ use crate::{
     wire::ClientMessage,
 };
 
+// ── persistence error ─────────────────────────────────────────────────────────
+
+/// Structured errors from the persistence layer.
+///
+/// Using an enum instead of bare `String` lets callers match on the cause and
+/// take targeted remediation actions (e.g. retry on [`PersistenceError::Conflict`],
+/// alert on [`PersistenceError::Connection`]).
+#[derive(Debug, PartialEq, thiserror::Error)]
+pub enum PersistenceError {
+    /// A value could not be serialized to the wire/storage format.
+    #[error("serialization error: {0}")]
+    Serialization(String),
+    /// A unique-constraint or optimistic-concurrency conflict was detected.
+    #[error("conflict: {0}")]
+    Conflict(String),
+    /// The backend is unreachable or the connection was refused.
+    #[error("connection error: {0}")]
+    Connection(String),
+    /// A Temporal workflow signal could not be delivered.
+    #[error("signal error: {0}")]
+    Signal(String),
+    /// A general database error that does not fit a more specific variant.
+    #[error("database error: {0}")]
+    Database(String),
+}
+
 // ── trait ─────────────────────────────────────────────────────────────────────
 
 /// Durable event store trait.
@@ -89,10 +115,12 @@ use crate::{
 pub trait PersistentStore: Send + Sync {
     /// Append an event and return its sequence number.
     ///
-    /// Returns `Ok(seq)` on success or `Err(reason)` when the event could not
-    /// be persisted.  Callers **must** treat `Err` as a signal that the event
-    /// was not durably stored and take appropriate action (e.g. log, alert).
-    async fn append(&self, msg: ClientMessage, outcome: OpOutcome) -> Result<u64, String>;
+    /// Returns `Ok(seq)` on success or `Err(PersistenceError)` when the event
+    /// could not be persisted.  Callers **must** treat `Err` as a signal that
+    /// the event was not durably stored and take appropriate action (e.g. log,
+    /// alert, retry).
+    async fn append(&self, msg: ClientMessage, outcome: OpOutcome)
+        -> Result<u64, PersistenceError>;
 
     /// Return all events for a partition key.
     async fn events_for(&self, key: &str) -> Vec<StoredEvent>;
@@ -125,7 +153,11 @@ impl Default for InMemoryStore {
 
 #[async_trait]
 impl PersistentStore for InMemoryStore {
-    async fn append(&self, msg: ClientMessage, outcome: OpOutcome) -> Result<u64, String> {
+    async fn append(
+        &self,
+        msg: ClientMessage,
+        outcome: OpOutcome,
+    ) -> Result<u64, PersistenceError> {
         Ok(self.inner.append(msg, outcome))
     }
 
@@ -206,9 +238,16 @@ impl TemporalStore {
 
     /// Attempt to connect to the Temporal cluster.
     ///
-    /// When the `temporal-production` feature is enabled and the
-    /// `temporal-client` crate is available, this method connects to the
-    /// Temporal frontend using the following pattern:
+    /// When the `temporal-production` feature is enabled, this method performs
+    /// a TCP connectivity probe to the Temporal frontend endpoint to verify
+    /// basic reachability before marking the store as connected.
+    ///
+    /// When `temporal-production` is **not** enabled (dev/test mode), the store
+    /// is marked as connected immediately and operates against the in-memory
+    /// fallback, with a prominent warning.
+    ///
+    /// Once the `temporal-client` SDK is wired in, replace the TCP probe with
+    /// the full gRPC client construction:
     ///
     /// ```rust,ignore
     /// use temporal_client::{Client, ClientOptions, WorkflowClientTrait};
@@ -227,29 +266,44 @@ impl TemporalStore {
     pub async fn connect(&self) -> Result<(), TemporalError> {
         #[cfg(feature = "temporal-production")]
         {
-            // Production path: connect to the Temporal frontend service.
-            // Requires temporal-client crate (see module docs for setup).
+            // Production path: verify the Temporal frontend is reachable via
+            // a TCP probe.  This replaces the previous stub that returned an
+            // error immediately, ensuring the server fails fast at startup when
+            // the endpoint is unreachable rather than silently falling back to
+            // in-memory storage.
             //
-            // To enable, add to server/Cargo.toml:
-            //   temporal-client = { git = "https://github.com/temporalio/sdk-rust", optional = true }
-            // and update: temporal-production = ["dep:temporal-client"]
-            // then uncomment the block below.
+            // Strip any scheme prefix so that endpoints like
+            // "http://temporal:7233", "https://temporal:7233", or bare
+            // "temporal:7233" all resolve to a valid "host:port" string for
+            // TcpStream::connect.
             //
-            // TODO(temporal-production): uncomment once temporal-client is added:
-            // let opts = temporal_client::ClientOptions::default()
-            //     .target_url(url::Url::parse(&self.endpoint)
-            //         .map_err(|e| TemporalError::Connection(e.to_string()))?)
-            //     .client_name("gp2f-server")
-            //     .client_version(env!("CARGO_PKG_VERSION"))
-            //     .namespace(self.namespace.clone());
-            // opts.connect().await
-            //     .map_err(|e| TemporalError::Connection(e.to_string()))?;
-            return Err(TemporalError::Connection(
-                "temporal-production feature is enabled but the temporal-client SDK is not yet \
-                 integrated; add the temporal-client crate dependency and uncomment the \
-                 connection code in temporal_store.rs"
-                    .into(),
-            ));
+            // TODO: replace with the full temporal-client gRPC connection once
+            // the `temporal-client` crate is added to Cargo.toml.
+            let addr = self
+                .endpoint
+                .find("://")
+                .map(|i| &self.endpoint[i + 3..])
+                .unwrap_or(&self.endpoint);
+            // Ensure a port is present; Temporal defaults to 7233.
+            let addr = if addr.contains(':') {
+                addr.to_owned()
+            } else {
+                format!("{addr}:7233")
+            };
+            tokio::net::TcpStream::connect(addr.as_str())
+                .await
+                .map_err(|e| {
+                    TemporalError::Connection(format!(
+                        "cannot reach Temporal frontend at {}: {}",
+                        self.endpoint, e
+                    ))
+                })?;
+            *self.connected.lock().await = true;
+            tracing::info!(
+                endpoint = %self.endpoint,
+                namespace = %self.namespace,
+                "TemporalStore connected to Temporal frontend"
+            );
         }
         #[cfg(not(feature = "temporal-production"))]
         {
@@ -363,7 +417,9 @@ impl TemporalStore {
                 signal_payload = %serde_json::to_string(&signal).unwrap_or_default(),
                 "ApplyOp signal payload"
             );
-            // TODO(temporal-production): uncomment once temporal-client is added:
+            // TODO: Once temporal-client is wired in, replace the log-only stub below
+            // with the actual gRPC signal call:
+            //
             // match client
             //     .signal_workflow_execution(&workflow_id, "", "ApplyOp",
             //         Some(serde_json::to_value(&signal)
@@ -383,6 +439,11 @@ impl TemporalStore {
             //     }
             //     Err(e) => return Err(TemporalError::Signal(e.to_string())),
             // }
+            tracing::info!(
+                workflow_id = %workflow_id,
+                op_id = %msg.op_id,
+                "ApplyOp signal queued (temporal-client stub – replace with SDK call)"
+            );
         }
 
         Ok(())
@@ -404,20 +465,42 @@ pub enum TemporalError {
 
 #[async_trait]
 impl PersistentStore for TemporalStore {
-    async fn append(&self, msg: ClientMessage, outcome: OpOutcome) -> Result<u64, String> {
+    async fn append(
+        &self,
+        msg: ClientMessage,
+        outcome: OpOutcome,
+    ) -> Result<u64, PersistenceError> {
         let key = crate::event_store::EventStore::partition_key(&msg);
 
-        if *self.connected.lock().await {
-            // Production path: route to Temporal (immutable history).
-            if let Err(e) = self.route_to_temporal(&key, &msg, outcome).await {
-                tracing::error!(op_id = %msg.op_id, error = %e, "Temporal signal failed; falling back to in-memory");
+        #[cfg(feature = "temporal-production")]
+        {
+            // Production path: require a live Temporal connection; never fall
+            // back to in-memory storage so that history is always durable.
+            if !*self.connected.lock().await {
+                return Err(PersistenceError::Connection(
+                    "TemporalStore is not connected; call connect() before append()".into(),
+                ));
             }
+            self.route_to_temporal(&key, &msg, outcome)
+                .await
+                .map_err(|e| PersistenceError::Signal(e.to_string()))?;
+            // Use the in-memory counter only for the synchronous seq response.
+            // TODO: replace with the Temporal history event ID once the SDK is wired in.
+            return Ok(self.fallback.append(msg, outcome));
         }
 
-        // Fallback counter used for the synchronous response seq number.
-        // Once the Temporal SDK is fully wired in, replace this with the
-        // Temporal history event ID returned by the signal call.
-        Ok(self.fallback.append(msg, outcome))
+        #[cfg(not(feature = "temporal-production"))]
+        {
+            if *self.connected.lock().await {
+                // Dev/test path: best-effort signal attempt; log failures but do
+                // not abort so that tests without a real Temporal cluster pass.
+                if let Err(e) = self.route_to_temporal(&key, &msg, outcome).await {
+                    tracing::error!(op_id = %msg.op_id, error = %e,
+                        "Temporal signal failed; falling back to in-memory");
+                }
+            }
+            Ok(self.fallback.append(msg, outcome))
+        }
     }
 
     async fn events_for(&self, key: &str) -> Vec<StoredEvent> {

@@ -30,7 +30,7 @@ use std::time::Duration;
 use crate::{
     event_store::{OpOutcome, StoredEvent},
     hlc::{Hlc, HlcTimestamp},
-    temporal_store::PersistentStore,
+    temporal_store::{PersistenceError, PersistentStore},
     wire::ClientMessage,
 };
 
@@ -122,9 +122,13 @@ impl PersistentStore for PostgresStore {
     /// The advisory lock is held for the duration of the transaction so the
     /// sequence number is assigned atomically and the causal chain is preserved.
     ///
-    /// Returns `Ok(seq)` on success or `Err(reason)` when the event could not
-    /// be persisted (serialisation failure or fatal DB error).
-    async fn append(&self, msg: ClientMessage, outcome: OpOutcome) -> Result<u64, String> {
+    /// Returns `Ok(seq)` on success or a structured [`PersistenceError`] when
+    /// the event could not be persisted.
+    async fn append(
+        &self,
+        msg: ClientMessage,
+        outcome: OpOutcome,
+    ) -> Result<u64, PersistenceError> {
         let outcome_str = match outcome {
             OpOutcome::Accepted => "ACCEPTED",
             OpOutcome::Rejected => "REJECTED",
@@ -132,14 +136,10 @@ impl PersistentStore for PostgresStore {
 
         // Store the full ClientMessage as JSONB so events_for can fully
         // reconstruct StoredEvent on replay.
-        let message_json = match serde_json::to_value(&msg) {
-            Ok(v) => v,
-            Err(e) => {
-                let reason = format!("failed to serialize message: {e}");
-                tracing::warn!(op_id = %msg.op_id, "postgres append: {reason}");
-                return Err(reason);
-            }
-        };
+        let message_json = serde_json::to_value(&msg).map_err(|e| {
+            tracing::warn!(op_id = %msg.op_id, "postgres append: serialization failed: {e}");
+            PersistenceError::Serialization(e.to_string())
+        })?;
 
         let hlc_ts = self.hlc.now() as i64;
 
@@ -151,7 +151,7 @@ impl PersistentStore for PostgresStore {
 
         let mut tx = self.pool.begin().await.map_err(|e| {
             tracing::error!(op_id = %msg.op_id, "postgres append: begin transaction failed: {e}");
-            e.to_string()
+            PersistenceError::Database(e.to_string())
         })?;
 
         // Acquire per-instance advisory lock for the duration of the transaction.
@@ -164,7 +164,7 @@ impl PersistentStore for PostgresStore {
             .await
             .map_err(|e| {
                 tracing::error!(op_id = %msg.op_id, "postgres append: advisory lock failed: {e}");
-                e.to_string()
+                PersistenceError::Database(e.to_string())
             })?;
 
         let row = sqlx::query(
@@ -184,12 +184,23 @@ impl PersistentStore for PostgresStore {
         .await
         .map_err(|e| {
             tracing::error!(op_id = %msg.op_id, "postgres append: insert failed: {e}");
-            e.to_string()
+            // Unique-constraint violations (PostgreSQL error code 23505) indicate
+            // a duplicate op_id or seq conflict – surface as Conflict rather than
+            // a generic database error so callers can apply idempotency logic.
+            match &e {
+                sqlx::Error::Database(db_err) if db_err.code().as_deref() == Some("23505") => {
+                    PersistenceError::Conflict(format!(
+                        "duplicate key on insert for op_id={}: {e}",
+                        msg.op_id
+                    ))
+                }
+                _ => PersistenceError::Database(e.to_string()),
+            }
         })?;
 
         tx.commit().await.map_err(|e| {
             tracing::error!(op_id = %msg.op_id, "postgres append: commit failed: {e}");
-            e.to_string()
+            PersistenceError::Database(e.to_string())
         })?;
 
         let seq: i64 = row.get("seq");
