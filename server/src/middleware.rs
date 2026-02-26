@@ -137,6 +137,75 @@ impl PublicKeyStore for InMemoryPublicKeyStore {
     }
 }
 
+// ── EnvVarKeyProvider ─────────────────────────────────────────────────────────
+
+/// Public key provider that reads keys from the `KEYS_JSON` environment
+/// variable (suitable for Kubernetes Secrets / Docker env injection).
+///
+/// `KEYS_JSON` must be a JSON object mapping `client_id` → 32-byte hex-encoded
+/// Ed25519 verifying key:
+///
+/// ```json
+/// {"client-a": "0102...1f20", "client-b": "abcd...ef01"}
+/// ```
+///
+/// Keys are loaded once at construction time.  To rotate keys, redeploy the
+/// server with the updated `KEYS_JSON` value.
+pub struct EnvVarKeyProvider {
+    keys: HashMap<String, VerifyingKey>,
+}
+
+impl EnvVarKeyProvider {
+    /// Parse `KEYS_JSON` and return a provider loaded with those keys.
+    ///
+    /// Returns an empty provider if the env var is not set or if any key
+    /// fails to parse (with a warning log per failed entry).
+    pub fn from_env() -> Self {
+        let raw = match std::env::var("KEYS_JSON") {
+            Ok(v) => v,
+            Err(_) => return Self { keys: HashMap::new() },
+        };
+        let map: HashMap<String, String> = match serde_json::from_str(&raw) {
+            Ok(m) => m,
+            Err(e) => {
+                tracing::warn!("KEYS_JSON is not valid JSON: {e}");
+                return Self { keys: HashMap::new() };
+            }
+        };
+        let mut keys = HashMap::new();
+        for (client_id, hex_key) in map {
+            match parse_verifying_key(&hex_key) {
+                Ok(vk) => {
+                    keys.insert(client_id, vk);
+                }
+                Err(e) => {
+                    tracing::warn!(client_id = %client_id, "KEYS_JSON: skipping invalid key: {e}");
+                }
+            }
+        }
+        Self { keys }
+    }
+}
+
+impl PublicKeyStore for EnvVarKeyProvider {
+    fn get(&self, client_id: &str) -> Option<VerifyingKey> {
+        self.keys.get(client_id).copied()
+    }
+}
+
+/// Parse a 64-character hex string into an Ed25519 [`VerifyingKey`].
+fn parse_verifying_key(hex: &str) -> Result<VerifyingKey, String> {
+    if hex.len() != 64 {
+        return Err(format!("expected 64 hex chars, got {}", hex.len()));
+    }
+    let mut bytes = [0u8; 32];
+    for (i, chunk) in hex.as_bytes().chunks(2).enumerate() {
+        let s = std::str::from_utf8(chunk).map_err(|e| e.to_string())?;
+        bytes[i] = u8::from_str_radix(s, 16).map_err(|e| e.to_string())?;
+    }
+    VerifyingKey::from_bytes(&bytes).map_err(|e| e.to_string())
+}
+
 // ── middleware state ──────────────────────────────────────────────────────────
 
 /// Shared state for [`OpIdLayer`].
@@ -495,5 +564,49 @@ mod tests {
         let nonce = parts.next().unwrap();
         assert!(ts > 0);
         assert!(!nonce.is_empty());
+    }
+
+    // ── EnvVarKeyProvider tests ───────────────────────────────────────────
+
+    #[test]
+    fn env_var_key_provider_empty_when_no_env_var() {
+        // Ensure the env var is not set.
+        std::env::remove_var("KEYS_JSON");
+        let provider = EnvVarKeyProvider::from_env();
+        assert!(provider.get("any-client").is_none());
+    }
+
+    #[test]
+    fn env_var_key_provider_loads_valid_key() {
+        use ed25519_dalek::SigningKey;
+        let signing_key = SigningKey::generate(&mut OsRng);
+        let hex_key: String = signing_key
+            .verifying_key()
+            .as_bytes()
+            .iter()
+            .map(|b| format!("{b:02x}"))
+            .collect();
+        let json = format!(r#"{{"client-a": "{hex_key}"}}"#);
+        std::env::set_var("KEYS_JSON", &json);
+        let provider = EnvVarKeyProvider::from_env();
+        assert!(provider.get("client-a").is_some());
+        assert!(provider.get("other-client").is_none());
+        std::env::remove_var("KEYS_JSON");
+    }
+
+    #[test]
+    fn env_var_key_provider_skips_invalid_hex() {
+        std::env::set_var("KEYS_JSON", r#"{"bad-client": "notvalidhex"}"#);
+        let provider = EnvVarKeyProvider::from_env();
+        assert!(provider.get("bad-client").is_none());
+        std::env::remove_var("KEYS_JSON");
+    }
+
+    #[test]
+    fn env_var_key_provider_invalid_json_returns_empty() {
+        std::env::set_var("KEYS_JSON", "not-json");
+        let provider = EnvVarKeyProvider::from_env();
+        assert!(provider.get("any").is_none());
+        std::env::remove_var("KEYS_JSON");
     }
 }
