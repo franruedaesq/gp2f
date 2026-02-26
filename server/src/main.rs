@@ -18,6 +18,7 @@ use gp2f_server::{
     llm_provider::{build_provider, LlmMessage, LlmProvider, LlmRequest},
     middleware::{
         EnvVarKeyProvider, InMemoryPublicKeyStore, OpIdLayer, PollingKeyProvider, PublicKeyStore,
+        SanitizeLayer,
     },
     rate_limit::{build_rate_limiter, DynRateLimiter},
     reconciler::Reconciler,
@@ -162,6 +163,17 @@ async fn main() {
             tracing::info!("Loading public keys from KEYS_JSON");
             Arc::new(EnvVarKeyProvider::from_env())
         } else {
+            let is_production = std::env::var("APP_ENV")
+                .map(|v| v.eq_ignore_ascii_case("production"))
+                .unwrap_or(false);
+            if is_production {
+                panic!(
+                    "KEYS_JSON or KEYS_POLL_INTERVAL_SECS must be set when APP_ENV=production. \
+                     Set KEYS_JSON to a JSON object mapping client_id to a hex-encoded Ed25519 \
+                     public key, or set KEYS_POLL_INTERVAL_SECS for live key rotation. \
+                     Refusing to start with an ephemeral in-memory key store in production."
+                );
+            }
             tracing::warn!(
                 "No key provider configured (KEYS_POLL_INTERVAL_SECS / KEYS_JSON not set); \
              using ephemeral InMemoryPublicKeyStore – this is INSECURE for production. \
@@ -247,6 +259,7 @@ async fn main() {
         .route("/agent/propose", post(agent_propose_handler))
         .with_state(state)
         .layer(op_id_layer)
+        .layer(SanitizeLayer)
         .layer(TraceLayer::new_for_http());
 
     let addr = "0.0.0.0:3000";
@@ -357,11 +370,8 @@ async fn handle_socket(mut socket: WebSocket, state: AppState) {
 
 async fn op_handler(
     State(state): State<AppState>,
-    Json(mut client_msg): Json<ClientMessage>,
+    Json(client_msg): Json<ClientMessage>,
 ) -> impl IntoResponse {
-    // Sanitize all string fields to strip control characters and invisible
-    // Unicode before any processing or storage in the event log.
-    client_msg.sanitize();
     if let Err(e) = client_msg.validate() {
         return (
             StatusCode::BAD_REQUEST,
@@ -409,11 +419,10 @@ async fn op_handler(
 /// 16 ms.
 async fn op_async_handler(
     State(state): State<AppState>,
-    Json(mut client_msg): Json<ClientMessage>,
+    Json(client_msg): Json<ClientMessage>,
 ) -> impl IntoResponse {
-    // Sanitize and validate before queuing to prevent malicious payloads from
+    // Validate before queuing to prevent malicious payloads from
     // being stored in the event log via the async pipeline.
-    client_msg.sanitize();
     if let Err(e) = client_msg.validate() {
         return (
             StatusCode::BAD_REQUEST,

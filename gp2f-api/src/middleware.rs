@@ -526,6 +526,116 @@ pub fn validate_op_id(
     None
 }
 
+// ── SanitizeLayer ─────────────────────────────────────────────────────────────
+
+/// Tower [`Layer`] that sanitizes [`gp2f_core::wire::ClientMessage`] JSON
+/// request bodies in-place before passing them to the inner service.
+///
+/// For every incoming request whose `Content-Type` contains
+/// `application/json`, the middleware:
+/// 1. Buffers the request body.
+/// 2. Attempts to deserialize it as a [`gp2f_core::wire::ClientMessage`].
+/// 3. Calls [`gp2f_core::wire::ClientMessage::sanitize`] if successful.
+/// 4. Re-serializes the sanitised message and replaces the request body.
+///
+/// Requests that are not JSON, or whose bodies cannot be parsed as
+/// [`gp2f_core::wire::ClientMessage`], are forwarded unchanged.  This ensures
+/// that sanitisation runs uniformly for every HTTP handler without requiring
+/// each handler to call `sanitize()` manually.
+#[derive(Clone)]
+pub struct SanitizeLayer;
+
+impl<S> Layer<S> for SanitizeLayer {
+    type Service = SanitizeMiddleware<S>;
+
+    fn layer(&self, inner: S) -> Self::Service {
+        SanitizeMiddleware { inner }
+    }
+}
+
+/// Tower [`Service`] produced by [`SanitizeLayer`].
+#[derive(Clone)]
+pub struct SanitizeMiddleware<S> {
+    inner: S,
+}
+
+/// Maximum byte size accepted when buffering a request body for sanitisation.
+/// Bodies larger than this limit are forwarded unchanged rather than risking
+/// memory exhaustion – the handler's own validation will reject oversized
+/// payloads.
+const SANITIZE_BODY_LIMIT: usize = 1_048_576; // 1 MiB
+
+impl<S, ResBody> Service<Request<axum::body::Body>> for SanitizeMiddleware<S>
+where
+    S: Service<Request<axum::body::Body>, Response = Response<ResBody>>
+        + Clone
+        + Send
+        + 'static,
+    S::Future: Send + 'static,
+    ResBody: Default + Send + 'static,
+{
+    type Response = S::Response;
+    type Error = S::Error;
+    type Future = std::pin::Pin<
+        Box<dyn std::future::Future<Output = Result<Self::Response, Self::Error>> + Send>,
+    >;
+
+    fn poll_ready(&mut self, cx: &mut Context<'_>) -> Poll<Result<(), Self::Error>> {
+        self.inner.poll_ready(cx)
+    }
+
+    fn call(&mut self, req: Request<axum::body::Body>) -> Self::Future {
+        // Use mem::replace so the polled (ready) service handles this request,
+        // and the clone becomes the dormant copy for the next call.
+        let clone = self.inner.clone();
+        let mut inner = std::mem::replace(&mut self.inner, clone);
+        Box::pin(async move {
+            let is_json = req
+                .headers()
+                .get(axum::http::header::CONTENT_TYPE)
+                .and_then(|v| v.to_str().ok())
+                .map(|s| s.contains("application/json"))
+                .unwrap_or(false);
+
+            if !is_json {
+                return inner.call(req).await;
+            }
+
+            let (parts, body) = req.into_parts();
+            let bytes = match axum::body::to_bytes(body, SANITIZE_BODY_LIMIT).await {
+                Ok(b) => b,
+                Err(_) => {
+                    // Body collection failed (e.g. exceeded size limit); forward
+                    // with an empty body and let the handler return the error.
+                    let req = Request::from_parts(parts, axum::body::Body::empty());
+                    return inner.call(req).await;
+                }
+            };
+
+            let new_bytes: Vec<u8> = if let Ok(mut msg) =
+                serde_json::from_slice::<gp2f_core::wire::ClientMessage>(&bytes)
+            {
+                msg.sanitize();
+                match serde_json::to_vec(&msg) {
+                    Ok(b) => b,
+                    Err(_) => {
+                        // Re-serialisation failed; reject rather than forwarding
+                        // the original unsanitised bytes.
+                        let mut resp = Response::new(ResBody::default());
+                        *resp.status_mut() = StatusCode::BAD_REQUEST;
+                        return Ok(resp);
+                    }
+                }
+            } else {
+                bytes.to_vec()
+            };
+
+            let req = Request::from_parts(parts, axum::body::Body::from(new_bytes));
+            inner.call(req).await
+        })
+    }
+}
+
 // ── tests ─────────────────────────────────────────────────────────────────────
 
 #[cfg(test)]
