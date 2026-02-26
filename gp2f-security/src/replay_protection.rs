@@ -320,8 +320,7 @@ impl ReplayStore for RedisReplayGuard {
 
         // Current Unix timestamp in seconds used as the ZSET member score.
         // Log a warning if the system clock appears to be set before the Unix epoch.
-        let now_secs: u64 = match std::time::SystemTime::now()
-            .duration_since(std::time::UNIX_EPOCH)
+        let now_secs: u64 = match std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH)
         {
             Ok(d) => d.as_secs(),
             Err(e) => {

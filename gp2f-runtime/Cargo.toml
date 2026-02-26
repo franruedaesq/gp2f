@@ -1,0 +1,18 @@
+[package]
+name = "gp2f-runtime"
+version.workspace = true
+edition.workspace = true
+authors.workspace = true
+license.workspace = true
+description = "GP2F WASM execution environment"
+
+[features]
+wasmtime-engine = ["dep:wasmtime", "dep:prost"]
+
+[dependencies]
+gp2f-core = { path = "../gp2f-core" }
+serde.workspace = true
+serde_json.workspace = true
+thiserror.workspace = true
+wasmtime = { version = "28", optional = true }
+prost = { version = "0.13", optional = true }

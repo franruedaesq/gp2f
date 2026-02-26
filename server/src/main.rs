@@ -16,7 +16,9 @@ use gp2f_server::{
     async_ingestion::AsyncIngestionQueue,
     compat,
     llm_provider::{build_provider, LlmMessage, LlmProvider, LlmRequest},
-    middleware::{EnvVarKeyProvider, InMemoryPublicKeyStore, OpIdLayer, PollingKeyProvider, PublicKeyStore},
+    middleware::{
+        EnvVarKeyProvider, InMemoryPublicKeyStore, OpIdLayer, PollingKeyProvider, PublicKeyStore,
+    },
     rate_limit::{build_rate_limiter, DynRateLimiter},
     reconciler::Reconciler,
     redis_broadcast::{build_broadcaster, DynBroadcaster},
@@ -125,27 +127,31 @@ async fn main() {
     //                              → EnvVarKeyProvider (static, one-shot load)
     //   3. Neither                 → empty InMemoryPublicKeyStore (dev/test only)
     const DEFAULT_KEYS_POLL_INTERVAL_SECS: u64 = 60;
-    let key_store: Arc<dyn PublicKeyStore> = if let Ok(interval_str) =
-        std::env::var("KEYS_POLL_INTERVAL_SECS")
-    {
-        let secs: u64 = interval_str.parse().unwrap_or(DEFAULT_KEYS_POLL_INTERVAL_SECS);
-        let interval = std::time::Duration::from_secs(secs);
-        tracing::info!(interval_secs = secs, "Loading public keys via PollingKeyProvider");
-        Arc::new(PollingKeyProvider::new(interval))
-    } else if gp2f_server::secrets::resolve_secret("KEYS_JSON").is_some() {
-        tracing::info!("Loading public keys from KEYS_JSON");
-        Arc::new(EnvVarKeyProvider::from_env())
-    } else {
-        tracing::warn!(
-            "No key provider configured (KEYS_POLL_INTERVAL_SECS / KEYS_JSON not set); \
+    let key_store: Arc<dyn PublicKeyStore> =
+        if let Ok(interval_str) = std::env::var("KEYS_POLL_INTERVAL_SECS") {
+            let secs: u64 = interval_str
+                .parse()
+                .unwrap_or(DEFAULT_KEYS_POLL_INTERVAL_SECS);
+            let interval = std::time::Duration::from_secs(secs);
+            tracing::info!(
+                interval_secs = secs,
+                "Loading public keys via PollingKeyProvider"
+            );
+            Arc::new(PollingKeyProvider::new(interval))
+        } else if gp2f_server::secrets::resolve_secret("KEYS_JSON").is_some() {
+            tracing::info!("Loading public keys from KEYS_JSON");
+            Arc::new(EnvVarKeyProvider::from_env())
+        } else {
+            tracing::warn!(
+                "No key provider configured (KEYS_POLL_INTERVAL_SECS / KEYS_JSON not set); \
              using ephemeral InMemoryPublicKeyStore – this is INSECURE for production. \
              Set KEYS_POLL_INTERVAL_SECS or KEYS_JSON to use a persistent key provider."
-        );
-        #[allow(deprecated)]
-        {
-            Arc::new(InMemoryPublicKeyStore::new())
-        }
-    };
+            );
+            #[allow(deprecated)]
+            {
+                Arc::new(InMemoryPublicKeyStore::new())
+            }
+        };
     let op_id_layer = OpIdLayer::new(key_store);
 
     // ── LLM provider (OpenAI / Anthropic / Groq / Mock) ───────────────────
@@ -153,8 +159,8 @@ async fn main() {
 
     // ── Redis actor coordinator (multi-replica split-brain detection) ─────
     #[cfg(feature = "redis-broadcast")]
-    let actor_coordinator = gp2f_server::actor::RedisActorCoordinator::from_env()
-        .map(std::sync::Arc::new);
+    let actor_coordinator =
+        gp2f_server::actor::RedisActorCoordinator::from_env().map(std::sync::Arc::new);
 
     // ── Async ingestion queue (Phase 2.2 – low-latency /op/async endpoint) ─
     let ingestion_buffer: usize = std::env::var("INGESTION_QUEUE_SIZE")
@@ -337,25 +343,41 @@ async fn op_handler(
     // Unicode before any processing or storage in the event log.
     client_msg.sanitize();
     if let Err(e) = client_msg.validate() {
-        return (StatusCode::BAD_REQUEST, Json(serde_json::json!({ "error": e }))).into_response();
+        return (
+            StatusCode::BAD_REQUEST,
+            Json(serde_json::json!({ "error": e })),
+        )
+            .into_response();
     }
     // Route through per-instance actor for serialised per-tenant processing.
-    let handle = match state.actor_registry.get_or_spawn(
-        &client_msg.tenant_id,
-        &client_msg.workflow_id,
-        &client_msg.instance_id,
-    ).await {
+    let handle = match state
+        .actor_registry
+        .get_or_spawn(
+            &client_msg.tenant_id,
+            &client_msg.workflow_id,
+            &client_msg.instance_id,
+        )
+        .await
+    {
         Ok(h) => h,
         Err(e) => {
             tracing::warn!(error = %e, "op_handler: instance owned by another pod");
-            return (StatusCode::SERVICE_UNAVAILABLE, Json(serde_json::json!({ "error": e.to_string() }))).into_response();
+            return (
+                StatusCode::SERVICE_UNAVAILABLE,
+                Json(serde_json::json!({ "error": e.to_string() })),
+            )
+                .into_response();
         }
     };
     let response = handle
         .reconcile(client_msg.clone())
         .await
         .unwrap_or_else(|| state.reconciler.reconcile(&client_msg));
-    (StatusCode::OK, Json(serde_json::to_value(&response).unwrap_or_default())).into_response()
+    (
+        StatusCode::OK,
+        Json(serde_json::to_value(&response).unwrap_or_default()),
+    )
+        .into_response()
 }
 
 /// POST /op/async – low-latency async ingestion endpoint (Phase 2.2).
@@ -383,11 +405,13 @@ async fn op_async_handler(
         Ok(ack) => (
             StatusCode::ACCEPTED,
             Json(serde_json::to_value(ack).unwrap_or_default()),
-        ).into_response(),
+        )
+            .into_response(),
         Err(e) => (
             StatusCode::SERVICE_UNAVAILABLE,
             Json(serde_json::json!({ "error": e.to_string() })),
-        ).into_response(),
+        )
+            .into_response(),
     }
 }
 
@@ -424,15 +448,23 @@ async fn ai_propose_handler(
     State(state): State<AppState>,
     Json(client_msg): Json<ClientMessage>,
 ) -> impl IntoResponse {
-    let handle = match state.actor_registry.get_or_spawn(
-        &client_msg.tenant_id,
-        &client_msg.workflow_id,
-        &client_msg.instance_id,
-    ).await {
+    let handle = match state
+        .actor_registry
+        .get_or_spawn(
+            &client_msg.tenant_id,
+            &client_msg.workflow_id,
+            &client_msg.instance_id,
+        )
+        .await
+    {
         Ok(h) => h,
         Err(e) => {
             tracing::warn!(error = %e, "ai_propose: instance owned by another pod");
-            return (StatusCode::SERVICE_UNAVAILABLE, Json(serde_json::json!({ "error": e.to_string() }))).into_response();
+            return (
+                StatusCode::SERVICE_UNAVAILABLE,
+                Json(serde_json::json!({ "error": e.to_string() })),
+            )
+                .into_response();
         }
     };
     let response = handle
@@ -533,10 +565,7 @@ fn guardrail_check(prompt: &str) -> Result<(), &'static str> {
     // code points (e.g. zero-width joiners used in homoglyph / hidden-text attacks).
     // sanitize_prompt_input already strips these characters; if a significant
     // fraction of the original input was invisible, treat it as suspicious.
-    let invisible_count = prompt
-        .chars()
-        .filter(|c| is_invisible_unicode(*c))
-        .count();
+    let invisible_count = prompt.chars().filter(|c| is_invisible_unicode(*c)).count();
     if invisible_count > MAX_INVISIBLE_UNICODE_CHARS {
         return Err("blocked by guardrail: excessive invisible characters");
     }
@@ -622,7 +651,11 @@ async fn agent_propose_handler(
     Json(req): Json<AgentProposeRequest>,
 ) -> impl IntoResponse {
     // 1. Rate-limit / budget check.
-    if let Err(e) = state.ai_rate_limiter.check_and_consume(&req.tenant_id).await {
+    if let Err(e) = state
+        .ai_rate_limiter
+        .check_and_consume(&req.tenant_id)
+        .await
+    {
         tracing::warn!(
             tenant_id = %req.tenant_id,
             error = %e,
@@ -779,15 +812,23 @@ async fn agent_propose_handler(
         vibe: req.vibe.clone(),
     };
 
-    let handle = match state.actor_registry.get_or_spawn(
-        &client_msg.tenant_id,
-        &client_msg.workflow_id,
-        &client_msg.instance_id,
-    ).await {
+    let handle = match state
+        .actor_registry
+        .get_or_spawn(
+            &client_msg.tenant_id,
+            &client_msg.workflow_id,
+            &client_msg.instance_id,
+        )
+        .await
+    {
         Ok(h) => h,
         Err(e) => {
             tracing::warn!(error = %e, "agent_propose: instance owned by another pod");
-            return (StatusCode::SERVICE_UNAVAILABLE, Json(serde_json::json!({ "error": e.to_string() }))).into_response();
+            return (
+                StatusCode::SERVICE_UNAVAILABLE,
+                Json(serde_json::json!({ "error": e.to_string() })),
+            )
+                .into_response();
         }
     };
 

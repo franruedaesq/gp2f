@@ -12,15 +12,28 @@ path = "src/main.rs"
 
 [features]
 default = ["redis-broadcast"]
-wasmtime-engine = ["dep:wasmtime", "dep:prost"]
-redis-broadcast = ["dep:redis"]
-postgres-store = ["dep:sqlx"]
+redis-broadcast = ["dep:redis", "gp2f-broadcast/redis-broadcast", "gp2f-token/redis-broadcast", "gp2f-actor/redis-broadcast", "gp2f-canary/redis-broadcast", "gp2f-security/redis-broadcast"]
+wasmtime-engine = ["dep:wasmtime", "dep:prost", "gp2f-runtime/wasmtime-engine"]
+postgres-store = ["dep:sqlx", "gp2f-store/postgres-store"]
 # Enable production Temporal routing. Requires adding the temporal-client crate:
 #   temporal-client = { git = "https://github.com/temporalio/sdk-rust", optional = true }
 # then change this line to: temporal-production = ["dep:temporal-client"]
 temporal-production = []
 
 [dependencies]
+gp2f-core = { path = "../gp2f-core" }
+gp2f-security = { path = "../gp2f-security" }
+gp2f-store = { path = "../gp2f-store" }
+gp2f-broadcast = { path = "../gp2f-broadcast", default-features = false }
+gp2f-token = { path = "../gp2f-token", default-features = false }
+gp2f-crdt = { path = "../gp2f-crdt", default-features = false }
+gp2f-actor = { path = "../gp2f-actor", default-features = false }
+gp2f-workflow = { path = "../gp2f-workflow" }
+gp2f-vibe = { path = "../gp2f-vibe" }
+gp2f-runtime = { path = "../gp2f-runtime" }
+gp2f-ingest = { path = "../gp2f-ingest" }
+gp2f-api = { path = "../gp2f-api", default-features = false }
+gp2f-canary = { path = "../gp2f-canary", default-features = false }
 policy-core = { path = "../policy-core", features = ["std"] }
 serde.workspace = true
 serde_json.workspace = true

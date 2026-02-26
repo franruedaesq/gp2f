@@ -254,7 +254,10 @@ impl PollingKeyProvider {
             loop {
                 tokio::time::sleep(interval).await;
                 let updated = load_keys_from_env();
-                tracing::debug!(count = updated.len(), "PollingKeyProvider: reloaded KEYS_JSON");
+                tracing::debug!(
+                    count = updated.len(),
+                    "PollingKeyProvider: reloaded KEYS_JSON"
+                );
                 match keys_clone.write() {
                     Ok(mut guard) => *guard = updated,
                     Err(poisoned) => {

@@ -1,0 +1,15 @@
+[package]
+name = "gp2f-core"
+version.workspace = true
+edition.workspace = true
+authors.workspace = true
+license.workspace = true
+description = "GP2F common types, traits, and utilities"
+
+[dependencies]
+policy-core = { path = "../policy-core", features = ["std"] }
+serde.workspace = true
+serde_json.workspace = true
+thiserror.workspace = true
+chrono.workspace = true
+blake3.workspace = true

@@ -1,0 +1,25 @@
+[package]
+name = "gp2f-api"
+version.workspace = true
+edition.workspace = true
+authors.workspace = true
+license.workspace = true
+description = "GP2F HTTP/WebSocket handlers and middleware"
+
+[features]
+default = ["redis-broadcast"]
+redis-broadcast = []
+
+[dependencies]
+gp2f-core = { path = "../gp2f-core" }
+gp2f-security = { path = "../gp2f-security" }
+policy-core = { path = "../policy-core", features = ["std"] }
+serde.workspace = true
+serde_json.workspace = true
+axum = { version = "0.7", features = ["ws"] }
+tokio = { version = "1", features = ["full"] }
+tower = { version = "0.4" }
+ed25519-dalek = { version = "2", features = ["rand_core"] }
+base64 = "0.22"
+rand = "0.8"
+tracing = "0.1"

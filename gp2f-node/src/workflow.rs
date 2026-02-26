@@ -70,7 +70,8 @@ pub(crate) struct ActivityEntry {
     #[allow(dead_code)]
     pub(crate) is_local: bool,
     /// Optional JS async callback invoked when the activity executes.
-    pub(crate) on_execute: Option<ThreadsafeFunction<JsExecutionContext, ErrorStrategy::CalleeHandled>>,
+    pub(crate) on_execute:
+        Option<ThreadsafeFunction<JsExecutionContext, ErrorStrategy::CalleeHandled>>,
 }
 
 // ── Workflow class ────────────────────────────────────────────────────────────
@@ -129,37 +130,25 @@ impl JsWorkflow {
         let policy = AstNode::try_from(config.policy)?;
         let tsfn = on_execute
             .map(|f| {
-                f.create_threadsafe_function(
-                    0,
-                    |ctx: ThreadSafeCallContext<JsExecutionContext>| {
-                        let env = ctx.env;
-                        let js_ctx = ctx.value;
+                f.create_threadsafe_function(0, |ctx: ThreadSafeCallContext<JsExecutionContext>| {
+                    let env = ctx.env;
+                    let js_ctx = ctx.value;
 
-                        // Build the JS object passed to the callback.
-                        let mut obj = env.create_object()?;
-                        obj.set_named_property(
-                            "instanceId",
-                            env.create_string(&js_ctx.instance_id)?,
-                        )?;
-                        obj.set_named_property(
-                            "tenantId",
-                            env.create_string(&js_ctx.tenant_id)?,
-                        )?;
-                        obj.set_named_property(
-                            "activityName",
-                            env.create_string(&js_ctx.activity_name)?,
-                        )?;
-                        // Pass the state as a JSON string.  Users call
-                        // `JSON.parse(ctx.stateJson)` or use the `state`
-                        // getter provided by the JavaScript wrapper.
-                        obj.set_named_property(
-                            "stateJson",
-                            env.create_string(&js_ctx.state_json)?,
-                        )?;
+                    // Build the JS object passed to the callback.
+                    let mut obj = env.create_object()?;
+                    obj.set_named_property("instanceId", env.create_string(&js_ctx.instance_id)?)?;
+                    obj.set_named_property("tenantId", env.create_string(&js_ctx.tenant_id)?)?;
+                    obj.set_named_property(
+                        "activityName",
+                        env.create_string(&js_ctx.activity_name)?,
+                    )?;
+                    // Pass the state as a JSON string.  Users call
+                    // `JSON.parse(ctx.stateJson)` or use the `state`
+                    // getter provided by the JavaScript wrapper.
+                    obj.set_named_property("stateJson", env.create_string(&js_ctx.state_json)?)?;
 
-                        Ok(vec![obj])
-                    },
-                )
+                    Ok(vec![obj])
+                })
             })
             .transpose()?;
 
@@ -214,15 +203,9 @@ impl JsWorkflow {
 /// This is a fire-and-forget call; the Rust runtime does not block on the JS
 /// promise.  In a full Temporal integration the promise resolution would be
 /// awaited before advancing the workflow.
-pub(crate) fn invoke_on_execute(
-    entry: &ActivityEntry,
-    ctx: JsExecutionContext,
-) {
+pub(crate) fn invoke_on_execute(entry: &ActivityEntry, ctx: JsExecutionContext) {
     if let Some(tsfn) = &entry.on_execute {
         // Non-blocking: queues the call on the JS event loop.
-        tsfn.call(
-            Ok(ctx),
-            ThreadsafeFunctionCallMode::NonBlocking,
-        );
+        tsfn.call(Ok(ctx), ThreadsafeFunctionCallMode::NonBlocking);
     }
 }

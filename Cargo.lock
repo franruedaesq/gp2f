@@ -1183,6 +1183,67 @@ dependencies = [
 ]
 
 [[package]]
+name = "gp2f-actor"
+version = "0.1.0"
+dependencies = [
+ "gp2f-core",
+ "gp2f-crdt",
+ "gp2f-security",
+ "gp2f-store",
+ "policy-core",
+ "redis",
+ "serde",
+ "serde_json",
+ "tokio",
+ "tracing",
+]
+
+[[package]]
+name = "gp2f-api"
+version = "0.1.0"
+dependencies = [
+ "axum",
+ "base64 0.22.1",
+ "ed25519-dalek",
+ "gp2f-core",
+ "gp2f-security",
+ "policy-core",
+ "rand 0.8.5",
+ "serde",
+ "serde_json",
+ "tokio",
+ "tower 0.4.13",
+ "tracing",
+]
+
+[[package]]
+name = "gp2f-broadcast"
+version = "0.1.0"
+dependencies = [
+ "gp2f-core",
+ "gp2f-security",
+ "redis",
+ "serde",
+ "serde_json",
+ "thiserror 2.0.18",
+ "tokio",
+ "tracing",
+]
+
+[[package]]
+name = "gp2f-canary"
+version = "0.1.0"
+dependencies = [
+ "gp2f-core",
+ "gp2f-crdt",
+ "gp2f-workflow",
+ "policy-core",
+ "serde",
+ "serde_json",
+ "tracing",
+]
+
+[[package]]
 name = "gp2f-cli"
 version = "0.1.0"
 dependencies = [
@@ -1191,6 +1252,45 @@ dependencies = [
  "serde",
  "serde_json",
  "thiserror 2.0.18",
+]
+
+[[package]]
+name = "gp2f-core"
+version = "0.1.0"
+dependencies = [
+ "blake3",
+ "chrono",
+ "policy-core",
+ "serde",
+ "serde_json",
+ "thiserror 2.0.18",
+]
+
+[[package]]
+name = "gp2f-crdt"
+version = "0.1.0"
+dependencies = [
+ "base64 0.22.1",
+ "chrono",
+ "gp2f-broadcast",
+ "gp2f-core",
+ "gp2f-security",
+ "gp2f-store",
+ "gp2f-token",
+ "policy-core",
+ "serde",
+ "serde_json",
+]
+
+[[package]]
+name = "gp2f-ingest"
+version = "0.1.0"
+dependencies = [
+ "gp2f-core",
+ "serde",
+ "serde_json",
+ "thiserror 2.0.18",
+ "tokio",
 ]
 
 [[package]]
@@ -1210,6 +1310,35 @@ dependencies = [
 ]
 
 [[package]]
+name = "gp2f-runtime"
+version = "0.1.0"
+dependencies = [
+ "gp2f-core",
+ "prost",
+ "serde",
+ "serde_json",
+ "thiserror 2.0.18",
+ "wasmtime",
+]
+
+[[package]]
+name = "gp2f-security"
+version = "0.1.0"
+dependencies = [
+ "async-trait",
+ "base64 0.22.1",
+ "gp2f-core",
+ "hmac-sha256",
+ "policy-core",
+ "redis",
+ "serde",
+ "serde_json",
+ "thiserror 2.0.18",
+ "tokio",
+ "tracing",
+]
+
+[[package]]
 name = "gp2f-server"
 version = "0.1.0"
 dependencies = [
@@ -1219,6 +1348,19 @@ dependencies = [
  "blake3",
  "chrono",
  "ed25519-dalek",
+ "gp2f-actor",
+ "gp2f-api",
+ "gp2f-broadcast",
+ "gp2f-canary",
+ "gp2f-core",
+ "gp2f-crdt",
+ "gp2f-ingest",
+ "gp2f-runtime",
+ "gp2f-security",
+ "gp2f-store",
+ "gp2f-token",
+ "gp2f-vibe",
+ "gp2f-workflow",
  "hmac-sha256",
  "policy-core",
  "prost",
@@ -1236,6 +1378,65 @@ dependencies = [
  "tracing-subscriber",
  "wasmtime",
  "wiremock",
+]
+
+[[package]]
+name = "gp2f-store"
+version = "0.1.0"
+dependencies = [
+ "async-trait",
+ "chrono",
+ "gp2f-core",
+ "serde",
+ "serde_json",
+ "sqlx",
+ "thiserror 2.0.18",
+ "tokio",
+ "tracing",
+]
+
+[[package]]
+name = "gp2f-token"
+version = "0.1.0"
+dependencies = [
+ "async-trait",
+ "blake3",
+ "gp2f-core",
+ "gp2f-security",
+ "rand 0.8.5",
+ "redis",
+ "serde",
+ "serde_json",
+ "thiserror 2.0.18",
+ "tokio",
+ "tracing",
+]
+
+[[package]]
+name = "gp2f-vibe"
+version = "0.1.0"
+dependencies = [
+ "async-trait",
+ "blake3",
+ "chrono",
+ "gp2f-api",
+ "gp2f-core",
+ "reqwest",
+ "serde",
+ "serde_json",
+ "thiserror 2.0.18",
+ "tokio",
+ "tracing",
+]
+
+[[package]]
+name = "gp2f-workflow"
+version = "0.1.0"
+dependencies = [
+ "policy-core",
+ "serde",
+ "serde_json",
+ "thiserror 2.0.18",
 ]
 
 [[package]]

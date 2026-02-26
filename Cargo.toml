@@ -4,6 +4,19 @@ members = [
     "cli",
     "server",
     "gp2f-node",
+    "gp2f-core",
+    "gp2f-security",
+    "gp2f-store",
+    "gp2f-broadcast",
+    "gp2f-token",
+    "gp2f-crdt",
+    "gp2f-actor",
+    "gp2f-workflow",
+    "gp2f-vibe",
+    "gp2f-runtime",
+    "gp2f-ingest",
+    "gp2f-api",
+    "gp2f-canary",
 ]
 resolver = "2"
 
