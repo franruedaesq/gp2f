@@ -164,8 +164,16 @@ async fn main() {
     let bg_actor_registry = Arc::new(ActorRegistry::with_store(event_store.clone()));
     tokio::spawn(async move {
         while let Some(msg) = ingestion_rx.recv().await {
-            let handle =
-                bg_actor_registry.get_or_spawn(&msg.tenant_id, &msg.workflow_id, &msg.instance_id);
+            let handle = match bg_actor_registry
+                .get_or_spawn(&msg.tenant_id, &msg.workflow_id, &msg.instance_id)
+                .await
+            {
+                Ok(h) => h,
+                Err(e) => {
+                    tracing::warn!(error = %e, "async ingestion: skipping op for split-brain instance");
+                    continue;
+                }
+            };
             let _response = handle
                 .reconcile(msg.clone())
                 .await
@@ -269,11 +277,19 @@ async fn handle_socket(mut socket: WebSocket, state: AppState) {
                             let client_msg = compat::transform_ast(&client_msg);
 
                             // Route through per-instance actor for serialised processing.
-                            let handle = state.actor_registry.get_or_spawn(
+                            let handle = match state.actor_registry.get_or_spawn(
                                 &client_msg.tenant_id,
                                 &client_msg.workflow_id,
                                 &client_msg.instance_id,
-                            );
+                            ).await {
+                                Ok(h) => h,
+                                Err(e) => {
+                                    tracing::warn!(error = %e, "ws: closing connection for split-brain instance");
+                                    // Instance is owned by another pod; close the connection
+                                    // so the client reconnects to the correct replica.
+                                    break;
+                                }
+                            };
                             let response = if let Some(resp) = handle.reconcile(client_msg).await {
                                 resp
                             } else {
@@ -304,18 +320,24 @@ async fn handle_socket(mut socket: WebSocket, state: AppState) {
 async fn op_handler(
     State(state): State<AppState>,
     Json(client_msg): Json<ClientMessage>,
-) -> Json<ServerMessage> {
+) -> impl IntoResponse {
     // Route through per-instance actor for serialised per-tenant processing.
-    let handle = state.actor_registry.get_or_spawn(
+    let handle = match state.actor_registry.get_or_spawn(
         &client_msg.tenant_id,
         &client_msg.workflow_id,
         &client_msg.instance_id,
-    );
+    ).await {
+        Ok(h) => h,
+        Err(e) => {
+            tracing::warn!(error = %e, "op_handler: instance owned by another pod");
+            return (StatusCode::SERVICE_UNAVAILABLE, Json(serde_json::json!({ "error": e.to_string() }))).into_response();
+        }
+    };
     let response = handle
         .reconcile(client_msg.clone())
         .await
         .unwrap_or_else(|| state.reconciler.reconcile(&client_msg));
-    Json(response)
+    (StatusCode::OK, Json(serde_json::to_value(&response).unwrap_or_default())).into_response()
 }
 
 /// POST /op/async – low-latency async ingestion endpoint (Phase 2.2).
@@ -374,11 +396,17 @@ async fn ai_propose_handler(
     State(state): State<AppState>,
     Json(client_msg): Json<ClientMessage>,
 ) -> impl IntoResponse {
-    let handle = state.actor_registry.get_or_spawn(
+    let handle = match state.actor_registry.get_or_spawn(
         &client_msg.tenant_id,
         &client_msg.workflow_id,
         &client_msg.instance_id,
-    );
+    ).await {
+        Ok(h) => h,
+        Err(e) => {
+            tracing::warn!(error = %e, "ai_propose: instance owned by another pod");
+            return (StatusCode::SERVICE_UNAVAILABLE, Json(serde_json::json!({ "error": e.to_string() }))).into_response();
+        }
+    };
     let response = handle
         .reconcile(client_msg.clone())
         .await
@@ -394,7 +422,7 @@ async fn ai_propose_handler(
         }
         ServerMessage::Hello(_) | ServerMessage::ReloadRequired(_) => {}
     }
-    (StatusCode::OK, Json(response))
+    (StatusCode::OK, Json(response)).into_response()
 }
 
 /// POST /ai/feedback – record a dismissed AI suggestion for retraining.
@@ -723,11 +751,17 @@ async fn agent_propose_handler(
         vibe: req.vibe.clone(),
     };
 
-    let handle = state.actor_registry.get_or_spawn(
+    let handle = match state.actor_registry.get_or_spawn(
         &client_msg.tenant_id,
         &client_msg.workflow_id,
         &client_msg.instance_id,
-    );
+    ).await {
+        Ok(h) => h,
+        Err(e) => {
+            tracing::warn!(error = %e, "agent_propose: instance owned by another pod");
+            return (StatusCode::SERVICE_UNAVAILABLE, Json(serde_json::json!({ "error": e.to_string() }))).into_response();
+        }
+    };
 
     let response = handle
         .reconcile(client_msg.clone())
