@@ -1,3 +1,12 @@
+// In no_std + alloc mode, bring heap types into scope.
+#[cfg(not(feature = "std"))]
+use alloc::{
+    format,
+    string::{String, ToString},
+    vec::Vec,
+};
+
+use rust_decimal::Decimal;
 use serde_json::Value;
 use thiserror::Error;
 
@@ -228,10 +237,11 @@ impl Evaluator {
                 }
 
                 if let Some(threshold_str) = &node.path {
-                    let threshold: f64 = threshold_str.parse().unwrap_or(1.0);
-                    let confidence = resolve_path(state, "/vibe/confidence")
-                        .and_then(|v| v.as_f64())
-                        .unwrap_or(0.0);
+                    let threshold: Decimal =
+                        threshold_str.parse().unwrap_or(Decimal::ONE);
+                    let confidence: Decimal = resolve_path(state, "/vibe/confidence")
+                        .and_then(|v| v.to_string().parse().ok())
+                        .unwrap_or(Decimal::ZERO);
                     result &= confidence >= threshold;
                 }
 
@@ -356,12 +366,34 @@ fn parse_scalar(s: &str) -> Result<Value, EvalError> {
     Ok(Value::String(s.to_owned()))
 }
 
+/// Convert a [`serde_json::Number`] to a [`Decimal`] without unnecessary heap
+/// allocation.
+///
+/// Prefer the integer path (`as_i64` / `as_u64`) when the number is integral;
+/// fall back to the canonical string representation only for floating-point
+/// values.  This avoids a heap-allocated `String` in the common integer case.
+fn number_to_decimal(n: &serde_json::Number) -> Option<Decimal> {
+    if let Some(i) = n.as_i64() {
+        return Some(Decimal::from(i));
+    }
+    if let Some(u) = n.as_u64() {
+        return Some(Decimal::from(u));
+    }
+    // Floating-point: use the JSON string representation which is exact for
+    // the values serde_json serialises (avoids IEEE 754 parsing ambiguity).
+    n.to_string().parse().ok()
+}
+
 /// Structural equality between two `Value`s.
+///
+/// Numbers are compared using [`Decimal`] to guarantee bit-for-bit parity
+/// across all platforms (no IEEE 754 float ambiguity).
 fn values_equal(a: &Value, b: &Value) -> bool {
-    // Coerce numeric types for comparison
     match (a, b) {
         (Value::Number(na), Value::Number(nb)) => {
-            na.as_f64().zip(nb.as_f64()).is_some_and(|(x, y)| x == y)
+            let da = number_to_decimal(na);
+            let db = number_to_decimal(nb);
+            da.zip(db).is_some_and(|(x, y)| x == y)
         }
         _ => a == b,
     }
@@ -369,22 +401,25 @@ fn values_equal(a: &Value, b: &Value) -> bool {
 
 /// Numeric ordering: returns -1, 0, or 1.
 ///
+/// Numeric comparisons use [`Decimal`] for cross-platform determinism.
 /// Only valid for numbers and strings.
 fn compare_values(a: &Value, b: &Value) -> Result<i32, EvalError> {
     match (a, b) {
         (Value::Number(na), Value::Number(nb)) => {
-            let x = na
-                .as_f64()
+            let x = number_to_decimal(na)
                 .ok_or_else(|| EvalError::TypeMismatch(a.to_string(), b.to_string()))?;
-            let y = nb
-                .as_f64()
+            let y = number_to_decimal(nb)
                 .ok_or_else(|| EvalError::TypeMismatch(a.to_string(), b.to_string()))?;
-            Ok(x.partial_cmp(&y).map(|o| o as i32).unwrap_or(0))
+            Ok(match x.cmp(&y) {
+                core::cmp::Ordering::Less => -1,
+                core::cmp::Ordering::Equal => 0,
+                core::cmp::Ordering::Greater => 1,
+            })
         }
         (Value::String(sa), Value::String(sb)) => Ok(match sa.cmp(sb) {
-            std::cmp::Ordering::Less => -1,
-            std::cmp::Ordering::Equal => 0,
-            std::cmp::Ordering::Greater => 1,
+            core::cmp::Ordering::Less => -1,
+            core::cmp::Ordering::Equal => 0,
+            core::cmp::Ordering::Greater => 1,
         }),
         _ => Err(EvalError::TypeMismatch(
             type_name(a).into(),

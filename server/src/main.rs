@@ -13,6 +13,7 @@ use tracing_subscriber::{layer::SubscriberExt, util::SubscriberInitExt};
 use gp2f_server::{
     actor::ActorRegistry,
     async_ingestion::AsyncIngestionQueue,
+    compat,
     llm_provider::{build_provider, LlmMessage, LlmProvider, LlmRequest},
     middleware::{InMemoryPublicKeyStore, OpIdLayer},
     rate_limit::AiRateLimiter,
@@ -168,6 +169,12 @@ async fn handle_socket(mut socket: WebSocket, state: AppState) {
         let _ = socket.send(Message::Text(hello_json)).await;
     }
 
+    // ── Schema negotiation ────────────────────────────────────────────────
+    // The first ClientMessage the client sends is used as an implicit
+    // handshake.  If the client's AST version is incompatible we send
+    // RELOAD_REQUIRED and close the connection immediately.
+    let mut version_checked = false;
+
     loop {
         tokio::select! {
             // Incoming message from the WebSocket client
@@ -175,6 +182,20 @@ async fn handle_socket(mut socket: WebSocket, state: AppState) {
                 match msg {
                     Some(Ok(Message::Text(text))) => {
                         if let Ok(client_msg) = serde_json::from_str::<ClientMessage>(&text) {
+                            // On the first op, validate the AST version.
+                            if !version_checked {
+                                version_checked = true;
+                                if let Err(reload) = compat::check_version(&client_msg.ast_version) {
+                                    let resp = ServerMessage::ReloadRequired(reload);
+                                    let reply = serde_json::to_string(&resp).unwrap_or_default();
+                                    let _ = socket.send(Message::Text(reply)).await;
+                                    break;
+                                }
+                            }
+
+                            // Apply any compat-layer transformations.
+                            let client_msg = compat::transform_ast(&client_msg);
+
                             // Route through per-instance actor for serialised processing.
                             let handle = state.actor_registry.get_or_spawn(
                                 &client_msg.tenant_id,
@@ -299,7 +320,7 @@ async fn ai_propose_handler(
             // the LLM cannot use error codes to probe the policy engine.
             tracing::info!(op_id = %r.op_id, reason = %r.reason, "AI proposal rejected (dropped)");
         }
-        ServerMessage::Hello(_) => {}
+        ServerMessage::Hello(_) | ServerMessage::ReloadRequired(_) => {}
     }
     (StatusCode::OK, Json(response))
 }
@@ -579,7 +600,7 @@ async fn agent_propose_handler(
                 "AI agent proposal_rejected (dropped)"
             );
         }
-        ServerMessage::Hello(_) => {}
+        ServerMessage::Hello(_) | ServerMessage::ReloadRequired(_) => {}
     }
 
     (

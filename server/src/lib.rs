@@ -4,6 +4,7 @@ pub mod async_ingestion;
 pub mod broadcast;
 pub mod canary;
 pub mod chaos;
+pub mod compat;
 pub mod event_store;
 pub mod handlers;
 pub mod limits;

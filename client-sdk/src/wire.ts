@@ -57,7 +57,19 @@ export interface HelloMessage {
   serverHlcTs: number;
 }
 
+/**
+ * Sent by the server when the client's AST schema version is incompatible.
+ * The client MUST fetch a fresh policy bundle before reconnecting.
+ */
+export interface ReloadRequiredMessage {
+  /** The minimum AST version the server accepts (semver). */
+  minRequiredVersion: string;
+  /** Human-readable explanation. */
+  reason: string;
+}
+
 export type ServerMessage =
   | { type: "ACCEPT" } & AcceptResponse
   | { type: "REJECT" } & RejectResponse
-  | { type: "HELLO" } & HelloMessage;
+  | { type: "HELLO" } & HelloMessage
+  | { type: "RELOAD_REQUIRED" } & ReloadRequiredMessage;
