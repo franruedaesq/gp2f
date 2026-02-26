@@ -38,4 +38,13 @@ function loadNative() {
   )
 }
 
-module.exports = loadNative()
+const { p, PolicyBuilder, FieldBuilder, VibeBuilder } = require('./lib/policy-builder')
+
+let native
+try {
+  native = loadNative()
+} catch (_) {
+  native = {}
+}
+
+module.exports = { ...native, p, PolicyBuilder, FieldBuilder, VibeBuilder }
