@@ -11,8 +11,13 @@ use tower_http::trace::TraceLayer;
 use tracing_subscriber::{layer::SubscriberExt, util::SubscriberInitExt};
 
 use gp2f_server::{
+    actor::ActorRegistry,
+    middleware::{InMemoryPublicKeyStore, OpIdLayer},
     reconciler::Reconciler,
+    redis_broadcast::{build_broadcaster, DynBroadcaster},
+    temporal_store::{InMemoryStore, PersistentStore, TemporalStore},
     token_service::{MintRequest, RedeemRequest, TokenService},
+    wasm_engine::WasmtimeEngine,
     wire::{ClientMessage, ServerMessage},
 };
 
@@ -20,6 +25,12 @@ use gp2f_server::{
 struct AppState {
     reconciler: Arc<Reconciler>,
     token_service: Arc<TokenService>,
+    actor_registry: Arc<ActorRegistry>,
+    /// Broadcaster (Redis PubSub or in-process fallback).
+    broadcaster: DynBroadcaster,
+    /// Persistent event store (Temporal in production, in-memory for dev).
+    #[allow(dead_code)]
+    event_store: Arc<dyn PersistentStore>,
 }
 
 #[tokio::main]
@@ -31,9 +42,43 @@ async fn main() {
         .with(tracing_subscriber::fmt::layer())
         .init();
 
+    // ── Wasmtime policy engine (optional) ──────────────────────────────────
+    let wasm_path = std::env::var("POLICY_WASM_PATH")
+        .unwrap_or_else(|_| "policy_wasm_bg.wasm".to_string());
+    match WasmtimeEngine::new(&wasm_path) {
+        Ok(_engine) => tracing::info!(%wasm_path, "Wasmtime policy engine loaded"),
+        Err(e) => tracing::info!("Wasmtime engine unavailable ({e}); using native evaluator"),
+    }
+
+    // ── Persistent event store ─────────────────────────────────────────────
+    let event_store: Arc<dyn PersistentStore> =
+        if let Ok(endpoint) = std::env::var("TEMPORAL_ENDPOINT") {
+            let namespace = std::env::var("TEMPORAL_NAMESPACE")
+                .unwrap_or_else(|_| "gp2f-prod".into());
+            let store = TemporalStore::new(endpoint.clone(), namespace);
+            if let Err(e) = store.connect().await {
+                tracing::warn!("Temporal connect failed ({e}); using in-memory fallback");
+            }
+            Arc::new(store)
+        } else {
+            tracing::info!("TEMPORAL_ENDPOINT not set; using in-memory event store");
+            Arc::new(InMemoryStore::new())
+        };
+
+    // ── Redis / in-process broadcaster ────────────────────────────────────
+    let broadcaster = build_broadcaster().await;
+
+    // ── Op-ID middleware (ed25519 validation) ─────────────────────────────
+    // In production, populate key_store from Redis or a secrets manager.
+    let key_store = Arc::new(InMemoryPublicKeyStore::new());
+    let op_id_layer = OpIdLayer::new(key_store);
+
     let state = AppState {
         reconciler: Arc::new(Reconciler::new()),
         token_service: Arc::new(TokenService::new()),
+        actor_registry: Arc::new(ActorRegistry::new()),
+        broadcaster,
+        event_store,
     };
 
     let app = Router::new()
@@ -44,6 +89,7 @@ async fn main() {
         .route("/token/redeem", post(token_redeem_handler))
         .route("/ai/propose", post(ai_propose_handler))
         .with_state(state)
+        .layer(op_id_layer)
         .layer(TraceLayer::new_for_http());
 
     let addr = "0.0.0.0:3000";
@@ -64,12 +110,9 @@ async fn ws_handler(ws: WebSocketUpgrade, State(state): State<AppState>) -> impl
 }
 
 async fn handle_socket(mut socket: WebSocket, state: AppState) {
-    // Check per-tenant WebSocket connection limit before accepting.
-    // We don't know the tenant until the first message, so we use a sentinel.
-    // Full tenant-scoped WS limiting requires reading the first message first.
-
-    // Subscribe to broadcast channel so we can push server-initiated messages.
-    let mut broadcast_rx = state.reconciler.broadcaster().subscribe();
+    // Subscribe to the broadcaster (Redis PubSub or in-process fallback) to
+    // receive server-initiated push messages.
+    let mut broadcast_rx = state.broadcaster.subscribe("__global__");
 
     loop {
         tokio::select! {
@@ -78,7 +121,18 @@ async fn handle_socket(mut socket: WebSocket, state: AppState) {
                 match msg {
                     Some(Ok(Message::Text(text))) => {
                         if let Ok(client_msg) = serde_json::from_str::<ClientMessage>(&text) {
-                            let response = state.reconciler.reconcile(&client_msg);
+                            // Route through per-instance actor for serialised processing.
+                            let handle = state.actor_registry.get_or_spawn(
+                                &client_msg.tenant_id,
+                                &client_msg.workflow_id,
+                                &client_msg.instance_id,
+                            );
+                            let response = if let Some(resp) = handle.reconcile(client_msg).await {
+                                resp
+                            } else {
+                                // Actor terminated unexpectedly; fall back to direct reconcile.
+                                continue;
+                            };
                             let reply = serde_json::to_string(&response).unwrap_or_default();
                             if socket.send(Message::Text(reply)).await.is_err() {
                                 break;
@@ -104,7 +158,17 @@ async fn op_handler(
     State(state): State<AppState>,
     Json(client_msg): Json<ClientMessage>,
 ) -> Json<ServerMessage> {
-    Json(state.reconciler.reconcile(&client_msg))
+    // Route through per-instance actor for serialised per-tenant processing.
+    let handle = state.actor_registry.get_or_spawn(
+        &client_msg.tenant_id,
+        &client_msg.workflow_id,
+        &client_msg.instance_id,
+    );
+    let response = handle
+        .reconcile(client_msg.clone())
+        .await
+        .unwrap_or_else(|| state.reconciler.reconcile(&client_msg));
+    Json(response)
 }
 
 async fn token_mint_handler(
@@ -140,7 +204,15 @@ async fn ai_propose_handler(
     State(state): State<AppState>,
     Json(client_msg): Json<ClientMessage>,
 ) -> impl IntoResponse {
-    let response = state.reconciler.reconcile(&client_msg);
+    let handle = state.actor_registry.get_or_spawn(
+        &client_msg.tenant_id,
+        &client_msg.workflow_id,
+        &client_msg.instance_id,
+    );
+    let response = handle
+        .reconcile(client_msg.clone())
+        .await
+        .unwrap_or_else(|| state.reconciler.reconcile(&client_msg));
     match &response {
         ServerMessage::Accept(a) => {
             tracing::info!(op_id = %a.op_id, "AI proposal accepted");
