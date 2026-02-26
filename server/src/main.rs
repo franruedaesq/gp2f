@@ -76,9 +76,7 @@ async fn main() {
     }
 
     // ── Persistent event store ─────────────────────────────────────────────
-    let event_store: Arc<dyn PersistentStore> = if let Ok(db_url) =
-        std::env::var("DATABASE_URL")
-    {
+    let event_store: Arc<dyn PersistentStore> = if let Ok(db_url) = std::env::var("DATABASE_URL") {
         #[cfg(feature = "postgres-store")]
         {
             use gp2f_server::postgres_store::PostgresStore;
@@ -96,7 +94,9 @@ async fn main() {
         #[cfg(not(feature = "postgres-store"))]
         {
             let _ = db_url;
-            tracing::warn!("DATABASE_URL set but postgres-store feature is disabled; using in-memory fallback");
+            tracing::warn!(
+                "DATABASE_URL set but postgres-store feature is disabled; using in-memory fallback"
+            );
             Arc::new(InMemoryStore::new())
         }
     } else if let Ok(endpoint) = std::env::var("TEMPORAL_ENDPOINT") {
@@ -117,13 +117,12 @@ async fn main() {
     // ── Op-ID middleware (ed25519 validation) ─────────────────────────────
     // Prefer KEYS_JSON (env-var key provider for K8s Secrets / production).
     // Fall back to an empty in-memory store (dev/unauthenticated mode).
-    let key_store: Arc<dyn PublicKeyStore> =
-        if std::env::var("KEYS_JSON").is_ok() {
-            tracing::info!("Loading public keys from KEYS_JSON");
-            Arc::new(EnvVarKeyProvider::from_env())
-        } else {
-            Arc::new(InMemoryPublicKeyStore::new())
-        };
+    let key_store: Arc<dyn PublicKeyStore> = if std::env::var("KEYS_JSON").is_ok() {
+        tracing::info!("Loading public keys from KEYS_JSON");
+        Arc::new(EnvVarKeyProvider::from_env())
+    } else {
+        Arc::new(InMemoryPublicKeyStore::new())
+    };
     let op_id_layer = OpIdLayer::new(key_store);
 
     // ── LLM provider (OpenAI / Anthropic / Groq / Mock) ───────────────────

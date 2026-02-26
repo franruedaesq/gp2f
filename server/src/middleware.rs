@@ -163,13 +163,19 @@ impl EnvVarKeyProvider {
     pub fn from_env() -> Self {
         let raw = match std::env::var("KEYS_JSON") {
             Ok(v) => v,
-            Err(_) => return Self { keys: HashMap::new() },
+            Err(_) => {
+                return Self {
+                    keys: HashMap::new(),
+                }
+            }
         };
         let map: HashMap<String, String> = match serde_json::from_str(&raw) {
             Ok(m) => m,
             Err(e) => {
                 tracing::warn!("KEYS_JSON is not valid JSON: {e}");
-                return Self { keys: HashMap::new() };
+                return Self {
+                    keys: HashMap::new(),
+                };
             }
         };
         let mut keys = HashMap::new();

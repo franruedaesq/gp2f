@@ -15,6 +15,10 @@ default = ["redis-broadcast"]
 wasmtime-engine = ["dep:wasmtime", "dep:prost"]
 redis-broadcast = ["dep:redis"]
 postgres-store = ["dep:sqlx"]
+# Enable production Temporal routing. Requires adding the temporal-client crate:
+#   temporal-client = { git = "https://github.com/temporalio/sdk-rust", optional = true }
+# then change this line to: temporal-production = ["dep:temporal-client"]
+temporal-production = []
 
 [dependencies]
 policy-core = { path = "../policy-core" }
@@ -41,6 +45,8 @@ prost = { version = "0.13", optional = true }
 redis = { version = "0.27", features = ["aio", "tokio-comp", "connection-manager"], optional = true }
 # optional: Postgres-backed durable event store
 sqlx = { version = "0.8", features = ["runtime-tokio", "tls-native-tls", "postgres", "json", "chrono"], optional = true }
+# optional: Temporal SDK – add when enabling the temporal-production feature:
+# temporal-client = { git = "https://github.com/temporalio/sdk-rust", optional = true }
 # async trait support (used by temporal_store and llm_provider)
 async-trait = "0.1"
 # HTTP client for LLM provider calls

@@ -25,6 +25,7 @@
 use async_trait::async_trait;
 use chrono::{DateTime, Utc};
 use sqlx::{postgres::PgPoolOptions, PgPool, Row};
+use std::time::Duration;
 
 use crate::{
     event_store::{OpOutcome, StoredEvent},
@@ -40,6 +41,8 @@ use crate::{
 pub enum PostgresStoreError {
     #[error("database error: {0}")]
     Db(#[from] sqlx::Error),
+    #[error("migration error: {0}")]
+    Migration(#[from] sqlx::migrate::MigrateError),
 }
 
 // ── store ─────────────────────────────────────────────────────────────────────
@@ -56,14 +59,29 @@ pub struct PostgresStore {
 impl PostgresStore {
     /// Connect to Postgres and return a new store.
     ///
-    /// Panics if the connection URL is invalid.  Returns an error if the
-    /// initial connection cannot be established.
+    /// - Configures the connection pool for production workloads.
+    /// - Runs any pending migrations from `migrations/` before returning.
+    ///
+    /// Returns an error if the initial connection cannot be established or
+    /// if a migration fails.
     pub async fn new(database_url: &str) -> Result<Self, PostgresStoreError> {
         let pool = PgPoolOptions::new()
             .max_connections(16)
+            .min_connections(2)
+            .acquire_timeout(Duration::from_secs(5))
+            .idle_timeout(Duration::from_secs(600))
             .connect(database_url)
             .await?;
-        Ok(Self { pool, hlc: Hlc::new() })
+
+        // Apply any pending migrations from the `migrations/` folder at the
+        // workspace root.  This is idempotent – already-applied migrations are
+        // skipped.
+        sqlx::migrate!("../migrations").run(&pool).await?;
+
+        Ok(Self {
+            pool,
+            hlc: Hlc::new(),
+        })
     }
 
     /// Build a partition key identical to [`EventStore::partition_key`].
@@ -183,7 +201,10 @@ impl PersistentStore for PostgresStore {
                 let message: ClientMessage = match serde_json::from_value(message_json) {
                     Ok(m) => m,
                     Err(e) => {
-                        tracing::warn!(seq, "postgres events_for: failed to deserialize message: {e}");
+                        tracing::warn!(
+                            seq,
+                            "postgres events_for: failed to deserialize message: {e}"
+                        );
                         return None;
                     }
                 };
