@@ -69,7 +69,60 @@ fn default_role() -> String {
     "default".to_owned()
 }
 
+/// Returns `true` for Unicode code points that are invisible / zero-width and
+/// commonly used in homoglyph or hidden-text injection attacks.
+fn is_invisible_unicode(c: char) -> bool {
+    matches!(
+        c,
+        '\u{00AD}' // SOFT HYPHEN
+        | '\u{200B}' // ZERO WIDTH SPACE
+        | '\u{200C}' // ZERO WIDTH NON-JOINER
+        | '\u{200D}' // ZERO WIDTH JOINER
+        | '\u{200E}' // LEFT-TO-RIGHT MARK
+        | '\u{200F}' // RIGHT-TO-LEFT MARK
+        | '\u{202A}' // LEFT-TO-RIGHT EMBEDDING
+        | '\u{202B}' // RIGHT-TO-LEFT EMBEDDING
+        | '\u{202C}' // POP DIRECTIONAL FORMATTING
+        | '\u{202D}' // LEFT-TO-RIGHT OVERRIDE
+        | '\u{202E}' // RIGHT-TO-LEFT OVERRIDE
+        | '\u{2060}' // WORD JOINER
+        | '\u{2061}' // FUNCTION APPLICATION
+        | '\u{2062}' // INVISIBLE TIMES
+        | '\u{2063}' // INVISIBLE SEPARATOR
+        | '\u{2064}' // INVISIBLE PLUS
+        | '\u{206A}'..='\u{206F}' // Deprecated format characters
+        | '\u{FEFF}' // ZERO WIDTH NO-BREAK SPACE (BOM)
+        | '\u{FFF9}'..='\u{FFFB}' // Interlinear annotation characters
+    )
+}
+
+/// Strip ASCII control characters (except tab and newline) and invisible
+/// Unicode code points from a field string.  Prevents XSS vectors, hidden-text
+/// attacks, and control-character injections from being stored in the event log.
+fn sanitize_field(s: &str) -> String {
+    s.chars()
+        .filter(|&c| !(c.is_control() && c != '\t' && c != '\n') && !is_invisible_unicode(c))
+        .collect()
+}
+
 impl ClientMessage {
+    /// Sanitize all string fields in-place by stripping ASCII control
+    /// characters (except tab and newline) and invisible Unicode code points.
+    ///
+    /// Call this before `validate()` and before any reconciliation logic to
+    /// prevent XSS vectors, control-character injections, and hidden-text
+    /// attacks from being stored in the event log.
+    pub fn sanitize(&mut self) {
+        self.op_id = sanitize_field(&self.op_id);
+        self.ast_version = sanitize_field(&self.ast_version);
+        self.action = sanitize_field(&self.action);
+        self.tenant_id = sanitize_field(&self.tenant_id);
+        self.workflow_id = sanitize_field(&self.workflow_id);
+        self.instance_id = sanitize_field(&self.instance_id);
+        self.client_snapshot_hash = sanitize_field(&self.client_snapshot_hash);
+        self.role = sanitize_field(&self.role);
+    }
+
     /// Validate all string fields against configured length limits.
     ///
     /// Returns `Err(reason)` when any field exceeds its maximum allowed length
@@ -369,5 +422,45 @@ mod tests {
         // A valid message with a payload just within the limit should pass.
         let msg = valid_msg();
         assert!(msg.validate().is_ok());
+    }
+
+    #[test]
+    fn sanitize_strips_control_characters() {
+        let mut msg = valid_msg();
+        // Embed NUL, BEL, and ESC control characters in several fields.
+        msg.op_id = "op\x00-1".into();
+        msg.action = "up\x07date".into();
+        msg.tenant_id = "ten\x1Bant1".into();
+        msg.sanitize();
+        assert_eq!(msg.op_id, "op-1");
+        assert_eq!(msg.action, "update");
+        assert_eq!(msg.tenant_id, "tenant1");
+    }
+
+    #[test]
+    fn sanitize_strips_invisible_unicode() {
+        let mut msg = valid_msg();
+        // Zero-width joiner (\u{200D}) and BOM (\u{FEFF}) are invisible.
+        msg.action = "up\u{200D}date".into();
+        msg.role = "de\u{FEFF}fault".into();
+        msg.sanitize();
+        assert_eq!(msg.action, "update");
+        assert_eq!(msg.role, "default");
+    }
+
+    #[test]
+    fn sanitize_preserves_tab_and_newline() {
+        let mut msg = valid_msg();
+        msg.action = "up\tdate\nv2".into();
+        msg.sanitize();
+        assert_eq!(msg.action, "up\tdate\nv2");
+    }
+
+    #[test]
+    fn sanitize_preserves_normal_unicode() {
+        let mut msg = valid_msg();
+        msg.tenant_id = "tëñant-1".into();
+        msg.sanitize();
+        assert_eq!(msg.tenant_id, "tëñant-1");
     }
 }

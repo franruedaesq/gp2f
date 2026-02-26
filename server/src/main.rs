@@ -136,6 +136,11 @@ async fn main() {
         tracing::info!("Loading public keys from KEYS_JSON");
         Arc::new(EnvVarKeyProvider::from_env())
     } else {
+        tracing::warn!(
+            "No key provider configured (KEYS_POLL_INTERVAL_SECS / KEYS_JSON not set); \
+             using ephemeral InMemoryPublicKeyStore – this is INSECURE for production. \
+             Set KEYS_POLL_INTERVAL_SECS or KEYS_JSON to use a persistent key provider."
+        );
         #[allow(deprecated)]
         {
             Arc::new(InMemoryPublicKeyStore::new())
@@ -261,7 +266,14 @@ async fn handle_socket(mut socket: WebSocket, state: AppState) {
             msg = socket.recv() => {
                 match msg {
                     Some(Ok(Message::Text(text))) => {
-                        if let Ok(client_msg) = serde_json::from_str::<ClientMessage>(&text) {
+                        if let Ok(mut client_msg) = serde_json::from_str::<ClientMessage>(&text) {
+                            // Sanitize all string fields to strip control characters
+                            // and invisible Unicode before any processing or storage.
+                            client_msg.sanitize();
+                            if let Err(e) = client_msg.validate() {
+                                tracing::warn!(error = %e, "ws: message validation failed");
+                                continue;
+                            }
                             // On the first op, validate the AST version.
                             if !version_checked {
                                 version_checked = true;
@@ -319,8 +331,14 @@ async fn handle_socket(mut socket: WebSocket, state: AppState) {
 
 async fn op_handler(
     State(state): State<AppState>,
-    Json(client_msg): Json<ClientMessage>,
+    Json(mut client_msg): Json<ClientMessage>,
 ) -> impl IntoResponse {
+    // Sanitize all string fields to strip control characters and invisible
+    // Unicode before any processing or storage in the event log.
+    client_msg.sanitize();
+    if let Err(e) = client_msg.validate() {
+        return (StatusCode::BAD_REQUEST, Json(serde_json::json!({ "error": e }))).into_response();
+    }
     // Route through per-instance actor for serialised per-tenant processing.
     let handle = match state.actor_registry.get_or_spawn(
         &client_msg.tenant_id,
@@ -349,17 +367,27 @@ async fn op_handler(
 /// 16 ms.
 async fn op_async_handler(
     State(state): State<AppState>,
-    Json(client_msg): Json<ClientMessage>,
+    Json(mut client_msg): Json<ClientMessage>,
 ) -> impl IntoResponse {
+    // Sanitize and validate before queuing to prevent malicious payloads from
+    // being stored in the event log via the async pipeline.
+    client_msg.sanitize();
+    if let Err(e) = client_msg.validate() {
+        return (
+            StatusCode::BAD_REQUEST,
+            Json(serde_json::json!({ "error": e })),
+        )
+            .into_response();
+    }
     match state.ingestion_queue.enqueue(client_msg).await {
         Ok(ack) => (
             StatusCode::ACCEPTED,
             Json(serde_json::to_value(ack).unwrap_or_default()),
-        ),
+        ).into_response(),
         Err(e) => (
             StatusCode::SERVICE_UNAVAILABLE,
             Json(serde_json::json!({ "error": e.to_string() })),
-        ),
+        ).into_response(),
     }
 }
 
