@@ -1,5 +1,5 @@
 use crate::broadcast::Broadcaster;
-use crate::event_store::{EventStore, OpOutcome};
+use crate::event_store::{EventStore, OpOutcome, StoredEvent};
 use crate::limits::{BackpressureSignal, LimitsGuard};
 use crate::rbac::RbacRegistry;
 use crate::replay_protection::ReplayGuard;
@@ -208,6 +208,41 @@ impl Reconciler {
     /// Return the number of ops processed (accepted + rejected).
     pub fn op_count(&self) -> usize {
         self.event_store.total_count()
+    }
+
+    /// Rebuild in-memory state by replaying previously persisted events.
+    ///
+    /// Call this once during actor initialisation (before serving any new
+    /// requests) to restore state after a pod restart or actor eviction.
+    ///
+    /// Only **accepted** events advance the authoritative state; rejected events
+    /// are skipped.  All op IDs (accepted and rejected) are registered with the
+    /// replay guard so that clients cannot re-submit already-seen operations.
+    pub fn recover_from_events(&self, events: &[StoredEvent]) {
+        let mut crdt_docs = self.crdt_docs.lock().unwrap();
+        let mut state = self.state.lock().unwrap();
+        let mut snapshot_history = self.snapshot_history.lock().unwrap();
+        let mut replay = self.replay.lock().unwrap();
+
+        for event in events {
+            // Mark op as seen in replay guard regardless of outcome so that
+            // clients cannot re-submit an already-processed operation.
+            replay.check_and_insert(&event.message.tenant_id, &event.message.op_id);
+
+            if event.outcome == OpOutcome::Accepted {
+                let instance_key = EventStore::partition_key(&event.message);
+                let new_state = apply_op_with_crdt(
+                    &state,
+                    &event.message.payload,
+                    &self.schema,
+                    &mut crdt_docs,
+                    &instance_key,
+                );
+                let new_hash = hash_state(&new_state);
+                snapshot_history.insert(new_hash, new_state.clone());
+                *state = new_state;
+            }
+        }
     }
 }
 
@@ -666,5 +701,103 @@ mod tests {
         );
 
         assert_eq!(result["notes"], json!("hello"));
+    }
+
+    /// Test that recover_from_events rebuilds state from accepted events only.
+    #[test]
+    fn recover_from_events_rebuilds_state() {
+        use crate::event_store::StoredEvent;
+        use chrono::Utc;
+
+        let r = Reconciler::new();
+        // State starts empty – hash is h0.
+        let h0 = hash_state(&r.current_state());
+
+        // Build a synthetic accepted StoredEvent that sets x=42.
+        let accepted_event = StoredEvent {
+            seq: 0,
+            ingested_at: Utc::now(),
+            hlc_ts: 0,
+            message: ClientMessage {
+                op_id: "op-recover".into(),
+                payload: json!({ "x": 42 }),
+                client_snapshot_hash: h0.clone(),
+                ..make_msg("op-recover", "")
+            },
+            outcome: OpOutcome::Accepted,
+        };
+
+        r.recover_from_events(&[accepted_event]);
+
+        // After recovery the state must contain x=42.
+        assert_eq!(r.current_state()["x"], json!(42));
+    }
+
+    /// Test that recover_from_events skips rejected events for state.
+    #[test]
+    fn recover_from_events_skips_rejected_events() {
+        use crate::event_store::StoredEvent;
+        use chrono::Utc;
+
+        let r = Reconciler::new();
+        let h0 = hash_state(&r.current_state());
+
+        let rejected_event = StoredEvent {
+            seq: 0,
+            ingested_at: Utc::now(),
+            hlc_ts: 0,
+            message: ClientMessage {
+                op_id: "op-rejected".into(),
+                payload: json!({ "x": 99 }),
+                client_snapshot_hash: h0.clone(),
+                ..make_msg("op-rejected", "")
+            },
+            outcome: OpOutcome::Rejected,
+        };
+
+        r.recover_from_events(&[rejected_event]);
+
+        // State must remain empty – rejected events don't change state.
+        assert_eq!(r.current_state(), json!({}));
+    }
+
+    /// Test that recover_from_events populates the replay guard so that
+    /// recovered op IDs are not re-accepted.
+    #[test]
+    fn recover_from_events_populates_replay_guard() {
+        use crate::event_store::StoredEvent;
+        use chrono::Utc;
+
+        let r = Reconciler::new();
+        let h0 = hash_state(&r.current_state());
+
+        let accepted_event = StoredEvent {
+            seq: 0,
+            ingested_at: Utc::now(),
+            hlc_ts: 0,
+            message: ClientMessage {
+                op_id: "op-already-seen".into(),
+                payload: json!({ "x": 1 }),
+                client_snapshot_hash: h0.clone(),
+                ..make_msg("op-already-seen", "")
+            },
+            outcome: OpOutcome::Accepted,
+        };
+
+        r.recover_from_events(&[accepted_event]);
+
+        // The same op_id must now be rejected as a duplicate.
+        let new_hash = hash_state(&r.current_state());
+        let dup_msg = ClientMessage {
+            op_id: "op-already-seen".into(),
+            client_snapshot_hash: new_hash,
+            payload: json!({ "x": 1 }),
+            ..make_msg("op-already-seen", "")
+        };
+        let resp = r.reconcile(&dup_msg);
+        assert!(
+            matches!(resp, ServerMessage::Reject(_)),
+            "duplicate op_id from before recovery must be rejected"
+        );
     }
 }

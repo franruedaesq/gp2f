@@ -119,10 +119,14 @@ struct WorkflowActor {
     /// Durable event store – every op outcome is persisted here so state
     /// survives pod restarts and actor evictions.
     persistent_store: Arc<dyn PersistentStore>,
+    /// Partition key `"tenant_id:workflow_id:instance_id"` used to load
+    /// prior events from the persistent store during recovery.
+    key: String,
 }
 
 impl WorkflowActor {
     fn new(
+        key: String,
         reconciler: Arc<Reconciler>,
         persistent_store: Arc<dyn PersistentStore>,
     ) -> (Self, ActorHandle) {
@@ -133,11 +137,27 @@ impl WorkflowActor {
             reconciler,
             broadcast_tx,
             persistent_store,
+            key,
         };
         (actor, ActorHandle { tx })
     }
 
     async fn run(mut self) {
+        // ── State recovery ────────────────────────────────────────────────
+        // Before serving any new requests, replay all previously persisted
+        // events so that the in-memory state is consistent with the durable
+        // store.  This eliminates state loss after pod restarts or actor
+        // evictions.
+        let prior_events = self.persistent_store.events_for(&self.key).await;
+        if !prior_events.is_empty() {
+            tracing::info!(
+                key = %self.key,
+                count = prior_events.len(),
+                "actor recovering state from persistent store"
+            );
+            self.reconciler.recover_from_events(&prior_events);
+        }
+
         while let Some(msg) = self.rx.recv().await {
             match msg {
                 ActorMessage::Reconcile { msg, reply_tx } => {
@@ -147,8 +167,14 @@ impl WorkflowActor {
                         ServerMessage::Accept(_) => OpOutcome::Accepted,
                         _ => OpOutcome::Rejected,
                     };
-                    let seq = self.persistent_store.append((*msg).clone(), outcome).await;
-                    tracing::debug!(op_id = %msg.op_id, seq, "op persisted to durable store");
+                    match self.persistent_store.append((*msg).clone(), outcome).await {
+                        Ok(seq) => {
+                            tracing::debug!(op_id = %msg.op_id, seq, "op persisted to durable store");
+                        }
+                        Err(e) => {
+                            tracing::error!(op_id = %msg.op_id, error = %e, "failed to persist op to durable store");
+                        }
+                    }
                     // Broadcast to subscribed WebSocket clients (ignore errors
                     // when there are no subscribers).
                     let _ = self.broadcast_tx.send(response.clone());
@@ -245,7 +271,7 @@ impl ActorRegistry {
             return handle.clone();
         }
         let reconciler = (self.reconciler_factory)();
-        let (actor, handle) = WorkflowActor::new(reconciler, self.persistent_store.clone());
+        let (actor, handle) = WorkflowActor::new(key.clone(), reconciler, self.persistent_store.clone());
         tokio::spawn(actor.run());
         map.insert(key.clone(), handle.clone());
 
@@ -499,5 +525,116 @@ mod tests {
         let r2 = handle.reconcile(msg2).await.unwrap();
         assert!(matches!(r1, ServerMessage::Accept(_)));
         assert!(matches!(r2, ServerMessage::Reject(_)));
+    }
+
+    /// Verify that a new actor recovers state from a pre-populated persistent
+    /// store, so that clients that were already at the latest hash can still
+    /// submit ops after a pod restart / actor eviction.
+    #[tokio::test]
+    async fn actor_recovers_state_from_persistent_store() {
+        use crate::temporal_store::InMemoryStore;
+
+        // Use IDs that match the actor key derived from get_or_spawn.
+        let make_tenant_msg = |op_id: &str, hash: &str| ClientMessage {
+            op_id: op_id.to_owned(),
+            ast_version: "1.0.0".into(),
+            action: "update".into(),
+            payload: json!({ "x": 1 }),
+            client_snapshot_hash: hash.to_owned(),
+            tenant_id: "t1".into(),
+            workflow_id: "wf1".into(),
+            instance_id: "i1".into(),
+            client_signature: None,
+            role: "default".into(),
+            vibe: None,
+        };
+
+        // Step 1: populate the store with one accepted op via a "first" actor.
+        let store = Arc::new(InMemoryStore::new());
+        let registry1 = ActorRegistry::with_store(store.clone());
+        let h1 = registry1.get_or_spawn("t1", "wf1", "i1");
+
+        let tmp = Reconciler::new();
+        let hash0 = hash_state(&tmp.current_state());
+        let msg1 = make_tenant_msg("op-before-restart", &hash0);
+        let r1 = h1.reconcile(msg1).await.unwrap();
+        assert!(matches!(r1, ServerMessage::Accept(_)));
+
+        // Give the actor task a moment to persist the event.
+        tokio::time::sleep(tokio::time::Duration::from_millis(20)).await;
+
+        // Verify the event was persisted under the correct partition key.
+        let events = store.events_for("t1:wf1:i1").await;
+        assert_eq!(events.len(), 1);
+
+        // Step 2: simulate a restart by creating a brand-new registry backed by
+        // the same store.  The new actor must recover state so the client's
+        // current hash (post-op-before-restart) is accepted.
+        let registry2 = ActorRegistry::with_store(store.clone());
+        let h2 = registry2.get_or_spawn("t1", "wf1", "i1");
+
+        // The client's snapshot hash after the first op was accepted.
+        let accepted_hash = if let ServerMessage::Accept(ref a) = r1 {
+            a.server_snapshot_hash.clone()
+        } else {
+            panic!("expected Accept");
+        };
+
+        // Give the recovery a moment to complete (it runs at the start of run()).
+        tokio::time::sleep(tokio::time::Duration::from_millis(50)).await;
+
+        // Build a new op using the post-restart hash – this should be accepted
+        // because the recovered actor has the same state.
+        let msg2 = make_tenant_msg("op-after-restart", &accepted_hash);
+        let r2 = h2.reconcile(msg2).await.unwrap();
+        assert!(
+            matches!(r2, ServerMessage::Accept(_)),
+            "recovered actor must accept ops using the pre-restart hash"
+        );
+    }
+
+    /// Verify that ops already processed before a restart are not re-accepted
+    /// (replay guard is populated during recovery).
+    #[tokio::test]
+    async fn recovered_actor_rejects_duplicate_op_ids() {
+        use crate::temporal_store::InMemoryStore;
+
+        let make_tenant_msg = |op_id: &str, hash: &str| ClientMessage {
+            op_id: op_id.to_owned(),
+            ast_version: "1.0.0".into(),
+            action: "update".into(),
+            payload: json!({ "x": 1 }),
+            client_snapshot_hash: hash.to_owned(),
+            tenant_id: "t1".into(),
+            workflow_id: "wf1".into(),
+            instance_id: "i2".into(),
+            client_signature: None,
+            role: "default".into(),
+            vibe: None,
+        };
+
+        let store = Arc::new(InMemoryStore::new());
+        let registry1 = ActorRegistry::with_store(store.clone());
+        let h1 = registry1.get_or_spawn("t1", "wf1", "i2");
+
+        let tmp = Reconciler::new();
+        let hash0 = hash_state(&tmp.current_state());
+        let original_msg = make_tenant_msg("op-dup-check", &hash0);
+        let r1 = h1.reconcile(original_msg.clone()).await.unwrap();
+        assert!(matches!(r1, ServerMessage::Accept(_)));
+
+        tokio::time::sleep(tokio::time::Duration::from_millis(20)).await;
+
+        // New registry, same store – actor recovers then rejects the duplicate.
+        let registry2 = ActorRegistry::with_store(store.clone());
+        let h2 = registry2.get_or_spawn("t1", "wf1", "i2");
+
+        tokio::time::sleep(tokio::time::Duration::from_millis(50)).await;
+
+        let r2 = h2.reconcile(original_msg).await.unwrap();
+        assert!(
+            matches!(r2, ServerMessage::Reject(_)),
+            "recovered actor must reject a duplicate op_id"
+        );
     }
 }

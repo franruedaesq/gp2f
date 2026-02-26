@@ -88,52 +88,22 @@ impl PostgresStore {
     fn partition_key(msg: &ClientMessage) -> String {
         format!("{}:{}:{}", msg.tenant_id, msg.workflow_id, msg.instance_id)
     }
-
-    /// Fetch the next sequence number for a partition, i.e. `MAX(seq) + 1`.
-    async fn next_seq(&self, msg: &ClientMessage) -> Result<i64, sqlx::Error> {
-        let row = sqlx::query(
-            "SELECT COALESCE(MAX(seq), -1) + 1 AS next_seq \
-             FROM event_log \
-             WHERE tenant_id = $1 AND workflow_id = $2 AND instance_id = $3",
-        )
-        .bind(&msg.tenant_id)
-        .bind(&msg.workflow_id)
-        .bind(&msg.instance_id)
-        .fetch_one(&self.pool)
-        .await?;
-
-        Ok(row.get::<i64, _>("next_seq"))
-    }
 }
-
-/// Returns `true` if `e` is a PostgreSQL unique-constraint violation (code 23505).
-///
-/// Used by [`PostgresStore::append`] to detect seq collisions during OCC retries.
-fn is_unique_violation(e: &sqlx::Error) -> bool {
-    if let sqlx::Error::Database(db_err) = e {
-        return db_err.code().map_or(false, |c| c == "23505");
-    }
-    false
-}
-
-/// Maximum number of OCC retry attempts in [`PostgresStore::append`].
-const MAX_APPEND_RETRIES: usize = 5;
 
 #[async_trait]
 impl PersistentStore for PostgresStore {
     /// Append an event to the log and return its sequence number.
     ///
-    /// Uses **Optimistic Concurrency Control (OCC)**: the unique primary key on
-    /// `(tenant_id, workflow_id, instance_id, seq)` detects concurrent writes
-    /// with the same sequence number.  On collision (PostgreSQL error 23505) the
-    /// method refetches `MAX(seq)` and retries up to [`MAX_APPEND_RETRIES`]
-    /// times.  This eliminates the TOCTOU race between the `SELECT MAX` and the
-    /// `INSERT` that existed in the original two-round-trip design.
+    /// Uses a single `INSERT … RETURNING seq` statement so the database
+    /// generates the sequence number atomically, eliminating the TOCTOU race
+    /// between a `SELECT MAX` and a subsequent `INSERT`.  The `seq` column is
+    /// backed by a `BIGSERIAL`-style sequence (see
+    /// `migrations/20240523_auto_seq.sql`), so no manual sequence calculation
+    /// is needed.
     ///
-    /// Returns `0` only when an unrecoverable error occurs (serialisation
-    /// failure, fatal DB error, or all OCC retries exhausted).  The caller
-    /// should treat `0` as a signal that the event was **not** persisted.
-    async fn append(&self, msg: ClientMessage, outcome: OpOutcome) -> u64 {
+    /// Returns `Ok(seq)` on success or `Err(reason)` when the event could not
+    /// be persisted (serialisation failure or fatal DB error).
+    async fn append(&self, msg: ClientMessage, outcome: OpOutcome) -> Result<u64, String> {
         let outcome_str = match outcome {
             OpOutcome::Accepted => "ACCEPTED",
             OpOutcome::Rejected => "REJECTED",
@@ -144,64 +114,36 @@ impl PersistentStore for PostgresStore {
         let message_json = match serde_json::to_value(&msg) {
             Ok(v) => v,
             Err(e) => {
-                tracing::warn!(op_id = %msg.op_id, "postgres append: failed to serialize message: {e}");
-                serde_json::Value::Null
+                let reason = format!("failed to serialize message: {e}");
+                tracing::warn!(op_id = %msg.op_id, "postgres append: {reason}");
+                return Err(reason);
             }
         };
 
-        for attempt in 0..MAX_APPEND_RETRIES {
-            let seq = match self.next_seq(&msg).await {
-                Ok(s) => s,
-                Err(e) => {
-                    tracing::error!("postgres append: failed to get next seq: {e}");
-                    return 0;
-                }
-            };
+        let hlc_ts = self.hlc.now() as i64;
 
-            // Recalculate the HLC timestamp on each attempt so that retried
-            // events always get a timestamp ≥ all previously observed clocks,
-            // preserving HLC monotonicity.
-            let hlc_ts = self.hlc.now() as i64;
+        let row = sqlx::query(
+            "INSERT INTO event_log \
+             (tenant_id, workflow_id, instance_id, op_id, ingested_at, hlc_ts, outcome, payload) \
+             VALUES ($1, $2, $3, $4, NOW(), $5, $6, $7) \
+             RETURNING seq",
+        )
+        .bind(&msg.tenant_id)
+        .bind(&msg.workflow_id)
+        .bind(&msg.instance_id)
+        .bind(&msg.op_id)
+        .bind(hlc_ts)
+        .bind(outcome_str)
+        .bind(&message_json)
+        .fetch_one(&self.pool)
+        .await
+        .map_err(|e| {
+            tracing::error!(op_id = %msg.op_id, "postgres append: insert failed: {e}");
+            e.to_string()
+        })?;
 
-            let result = sqlx::query(
-                "INSERT INTO event_log \
-                 (tenant_id, workflow_id, instance_id, seq, op_id, ingested_at, hlc_ts, outcome, payload) \
-                 VALUES ($1, $2, $3, $4, $5, NOW(), $6, $7, $8)",
-            )
-            .bind(&msg.tenant_id)
-            .bind(&msg.workflow_id)
-            .bind(&msg.instance_id)
-            .bind(seq)
-            .bind(&msg.op_id)
-            .bind(hlc_ts)
-            .bind(outcome_str)
-            .bind(&message_json)
-            .execute(&self.pool)
-            .await;
-
-            match result {
-                Ok(_) => return seq as u64,
-                Err(ref e) if is_unique_violation(e) => {
-                    tracing::warn!(
-                        op_id = %msg.op_id,
-                        attempt,
-                        "postgres append: seq conflict (OCC retry)"
-                    );
-                    // Another writer claimed this seq; refetch and retry.
-                    continue;
-                }
-                Err(e) => {
-                    tracing::error!("postgres append: insert failed: {e}");
-                    return 0;
-                }
-            }
-        }
-
-        tracing::error!(
-            op_id = %msg.op_id,
-            "postgres append: max OCC retries ({MAX_APPEND_RETRIES}) exceeded"
-        );
-        0
+        let seq: i64 = row.get("seq");
+        Ok(seq as u64)
     }
 
     async fn events_for(&self, key: &str) -> Vec<StoredEvent> {
