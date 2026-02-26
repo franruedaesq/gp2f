@@ -22,7 +22,7 @@ use gp2f_server::{
     token_service::{MintRequest, RedeemRequest, TokenService},
     tool_gating::ToolGatingService,
     wasm_engine::WasmtimeEngine,
-    wire::{AgentProposeRequest, ClientMessage, HelloMessage, ServerMessage},
+    wire::{AgentProposeRequest, AiFeedbackRequest, ClientMessage, HelloMessage, ServerMessage},
 };
 use policy_core::evaluator::hash_state;
 
@@ -131,6 +131,7 @@ async fn main() {
         .route("/token/mint", post(token_mint_handler))
         .route("/token/redeem", post(token_redeem_handler))
         .route("/ai/propose", post(ai_propose_handler))
+        .route("/ai/feedback", post(ai_feedback_handler))
         .route("/agent/propose", post(agent_propose_handler))
         .with_state(state)
         .layer(op_id_layer)
@@ -303,16 +304,97 @@ async fn ai_propose_handler(
     (StatusCode::OK, Json(response))
 }
 
+/// POST /ai/feedback – record a dismissed AI suggestion for retraining.
+///
+/// When a user dismisses an AI-generated proposal (e.g. clicks "Not helpful"),
+/// the client sends this event so the backend can:
+/// - Log the dismissed `op_id` for offline analysis.
+/// - Detect model drift when dismissal rates exceed a threshold.
+///
+/// In a production deployment this handler would write to an append-only
+/// feedback store (e.g. Kafka topic or S3 bucket) that feeds a retraining
+/// pipeline.  The current implementation logs the event via tracing so that
+/// log-aggregation tools (Datadog, Loki, etc.) can trigger downstream jobs.
+async fn ai_feedback_handler(
+    State(_state): State<AppState>,
+    Json(req): Json<AiFeedbackRequest>,
+) -> impl IntoResponse {
+    tracing::info!(
+        tenant_id = %req.tenant_id,
+        workflow_id = %req.workflow_id,
+        instance_id = %req.instance_id,
+        op_id = %req.op_id,
+        reason = %req.reason,
+        vibe_intent = req.vibe.as_ref().map(|v| v.intent.as_str()).unwrap_or("none"),
+        "ai_suggestion_dismissed"
+    );
+    (
+        StatusCode::OK,
+        Json(serde_json::json!({ "status": "recorded" })),
+    )
+}
+
+// ── guardrail check ───────────────────────────────────────────────────────────
+
+/// Lightweight guardrail check that rejects prompts containing known
+/// jailbreak / prompt-injection patterns before they reach the LLM.
+///
+/// In a production deployment this would call a dedicated safety model
+/// (e.g. Llama-Guard) via the same [`LlmProvider`] abstraction.  The
+/// rule-based implementation below provides a deterministic, zero-latency
+/// first layer of defence while the safety model call is in flight.
+fn guardrail_check(prompt: &str) -> Result<(), &'static str> {
+    let lower = prompt.to_lowercase();
+    // Common jailbreak signal phrases.
+    const BLOCKED_PATTERNS: &[&str] = &[
+        "ignore previous instructions",
+        "ignore all previous",
+        "disregard your instructions",
+        "you are now",
+        "act as if you are",
+        "pretend you are",
+        "forget your instructions",
+        "bypass your",
+        "override your",
+    ];
+    for pattern in BLOCKED_PATTERNS {
+        if lower.contains(pattern) {
+            return Err("blocked by guardrail");
+        }
+    }
+    Ok(())
+}
+
+// ── input sanitization ────────────────────────────────────────────────────────
+
+/// Maximum length allowed for user-supplied prompts (characters).
+const MAX_PROMPT_LEN: usize = 4_096;
+
+/// Sanitize a user-supplied prompt before it is inserted into an LLM template.
+///
+/// - Strips ASCII control characters (except `\t` and `\n`) that could be used
+///   to inject hidden instructions or escape structured prompts.
+/// - Trims the result and enforces a maximum length to prevent token stuffing.
+fn sanitize_prompt_input(input: &str) -> String {
+    fn is_allowed_char(c: char) -> bool {
+        !c.is_control() || c == '\t' || c == '\n'
+    }
+    let sanitized: String = input.chars().filter(|&c| is_allowed_char(c)).collect();
+    sanitized.trim().chars().take(MAX_PROMPT_LEN).collect()
+}
+
 /// POST /agent/propose – production LLM proposal handler.
 ///
 /// Full pipeline:
 /// 1. Per-tenant rate-limit check (token bucket + monthly budget guard).
 /// 2. Tool visibility gating via the AST evaluator.
-/// 3. LLM call (OpenAI / Anthropic / Groq / Mock) with `temperature=0`,
+/// 3. Input sanitization: strip control characters and enforce length limit.
+/// 4. Guardrail check: reject known jailbreak / prompt-injection patterns.
+/// 5. LLM call (OpenAI / Anthropic / Groq / Mock) with `temperature=0`,
 ///    `max_tokens=512`, `tool_choice="auto"`.
-/// 4. Validate the chosen tool against the allowed list.
-/// 5. Submit the resulting op through the actor/reconciler pipeline.
-/// 6. Log `proposal_rejected` audit events on any failure.
+/// 6. Validate the chosen tool against the allowed list.
+/// 7. Submit the resulting op through the actor/reconciler pipeline.
+///    Log `proposal_rejected` audit events on any failure.
 async fn agent_propose_handler(
     State(state): State<AppState>,
     Json(req): Json<AgentProposeRequest>,
@@ -358,10 +440,26 @@ async fn agent_propose_handler(
          Respond only with a single tool call."
     );
 
-    let user_content = req
+    // 3. Sanitize user-supplied prompt to strip control characters and
+    //    cap length, preventing prompt-injection attacks.
+    let raw_prompt = req
         .prompt
         .clone()
         .unwrap_or_else(|| "What is the most helpful next action?".into());
+    let user_content = sanitize_prompt_input(&raw_prompt);
+
+    // 4. Guardrail check: reject known jailbreak / injection patterns.
+    if let Err(reason) = guardrail_check(&user_content) {
+        tracing::warn!(
+            tenant_id = %req.tenant_id,
+            "Prompt blocked by guardrail: {reason}"
+        );
+        return (
+            StatusCode::BAD_REQUEST,
+            Json(serde_json::json!({ "error": "prompt rejected by safety guardrail" })),
+        )
+            .into_response();
+    }
 
     let llm_req = LlmRequest {
         messages: vec![
@@ -379,7 +477,7 @@ async fn agent_propose_handler(
         max_tokens: 512,
     };
 
-    // 4. Call the LLM provider.
+    // 5. Call the LLM provider.
     let llm_resp = match state.llm_provider.complete(&llm_req).await {
         Ok(r) => r,
         Err(e) => {
@@ -403,7 +501,7 @@ async fn agent_propose_handler(
         "LLM proposal received"
     );
 
-    // 5. Validate the chosen tool is in the allowed list.
+    // 6. Validate the chosen tool is in the allowed list.
     let tool_call = match llm_resp.tool_call {
         None => {
             tracing::info!(
@@ -432,7 +530,7 @@ async fn agent_propose_handler(
             .into_response();
     }
 
-    // 6. Map ephemeral tool_id → op action and submit through the reconciler.
+    // 7. Map ephemeral tool_id → op action and submit through the reconciler.
     let op_action = state
         .tool_gating
         .resolve_internal_fn(&tool_call.tool_id)

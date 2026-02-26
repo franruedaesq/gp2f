@@ -33,6 +33,19 @@ const policyViolations = new Counter("policy_violations");
 /** Tracks the latency of /agent/propose requests specifically. */
 const agentProposeLatency = new Trend("agent_propose_latency", true);
 
+/**
+ * Tracks "Time to First Token" (TTFT) – the wall-clock time between the HTTP
+ * request being sent and the first streaming token being received.
+ *
+ * In the current load-test harness this is approximated as the time between
+ * the request start and the server returning the first byte of the response
+ * body (k6 `http_req_waiting` metric captures this server-side).  A dedicated
+ * browser-timing metric would be captured by a real browser via the
+ * Performance API; we record it here via the HTTP response headers when the
+ * server supports the `X-First-Token-Ms` extension header.
+ */
+const timeToFirstToken = new Trend("time_to_first_token", true);
+
 // ── thresholds ────────────────────────────────────────────────────────────────
 
 export const options = {
@@ -76,6 +89,12 @@ export const options = {
     policy_violations: ["count==0"],
     /** AI-specific: p95 of /agent/propose must be below 800 ms. */
     agent_propose_latency: ["p(95)<800"],
+    /**
+     * Time to First Token: p95 must be below 400 ms.
+     * Measured as time from request start to first byte (http_req_waiting
+     * proxy) or the X-First-Token-Ms response header when available.
+     */
+    time_to_first_token: ["p(95)<400"],
   },
 };
 
@@ -175,6 +194,17 @@ export function aiAgentScenario() {
     tags: { name: "agent_propose" },
   });
   agentProposeLatency.add(Date.now() - start);
+
+  // Record Time to First Token.
+  // Prefer the X-First-Token-Ms header when the server streams partial tokens;
+  // fall back to http_req_waiting (time to first byte) otherwise.
+  const ttftHeader = res.headers["X-First-Token-Ms"];
+  if (ttftHeader) {
+    timeToFirstToken.add(parseFloat(ttftHeader));
+  } else {
+    // http_req_waiting is the closest proxy available in k6 for TTFT.
+    timeToFirstToken.add(res.timings.waiting);
+  }
 
   check(res, {
     "agent/propose: status 200 or 429": (r) => r.status === 200 || r.status === 429,

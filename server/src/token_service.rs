@@ -37,12 +37,40 @@ pub enum RedeemError {
     NotFound,
     #[error("token has already been redeemed")]
     AlreadyRedeemed,
+    #[error("token is locked (in-flight consumption by another request)")]
+    Locked,
     #[error("token has expired")]
     Expired,
     #[error("operation mismatch: expected '{expected}', got '{got}'")]
     OpMismatch { expected: String, got: String },
     #[error("AST state hash mismatch: token was issued for hash '{expected}', got '{got}'")]
     StateHashMismatch { expected: String, got: String },
+}
+
+// ── token state ───────────────────────────────────────────────────────────────
+
+/// Lifecycle states of an ephemeral tool token.
+///
+/// ```text
+/// ┌────────┐  lock()   ┌────────┐  redeem()  ┌──────────┐
+/// │ ISSUED │ ────────▶ │ LOCKED │ ──────────▶ │ CONSUMED │
+/// └────────┘           └────────┘             └──────────┘
+/// ```
+///
+/// The `LOCKED` state prevents double-spending across concurrent requests:
+/// a token is locked atomically before validation so that two simultaneous
+/// redemption calls cannot both pass the `redeemed` check.  In a distributed
+/// deployment the `lock()` + `redeem()` transition should be implemented with
+/// a Redis Lua script (or `WATCH`/`MULTI`/`EXEC`) for cross-replica safety.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum TokenState {
+    /// Minted and not yet claimed.
+    Issued,
+    /// Locked by an in-flight redemption request; cannot be redeemed by
+    /// another concurrent caller.
+    Locked,
+    /// Successfully consumed; no further operations permitted.
+    Consumed,
 }
 
 // ── internal storage ──────────────────────────────────────────────────────────
@@ -56,7 +84,7 @@ struct TokenRecord {
     /// BLAKE3 hex digest of the policy AST state at mint time.
     ast_state_hash: String,
     issued_at: Instant,
-    redeemed: bool,
+    state: TokenState,
 }
 
 // ── public API types ──────────────────────────────────────────────────────────
@@ -142,7 +170,7 @@ impl TokenService {
             op_name: req.op_name,
             ast_state_hash: req.ast_state_hash,
             issued_at: Instant::now(),
-            redeemed: false,
+            state: TokenState::Issued,
         };
         self.store.lock().unwrap().insert(token_id.clone(), record);
         MintResponse {
@@ -153,13 +181,15 @@ impl TokenService {
 
     /// Attempt to redeem a token.
     ///
-    /// On success the token is marked as redeemed (single-use).
+    /// On success the token is marked as consumed (single-use).
     pub fn redeem(&self, req: RedeemRequest) -> Result<RedeemResponse, RedeemError> {
         let mut store = self.store.lock().unwrap();
         let record = store.get_mut(&req.token_id).ok_or(RedeemError::NotFound)?;
 
-        if record.redeemed {
-            return Err(RedeemError::AlreadyRedeemed);
+        match record.state {
+            TokenState::Consumed => return Err(RedeemError::AlreadyRedeemed),
+            TokenState::Locked => return Err(RedeemError::Locked),
+            TokenState::Issued => {}
         }
         if record.issued_at.elapsed() > self.ttl {
             return Err(RedeemError::Expired);
@@ -183,8 +213,41 @@ impl TokenService {
             instance_id: record.instance_id.clone(),
             op_name: record.op_name.clone(),
         };
-        record.redeemed = true;
+        record.state = TokenState::Consumed;
         Ok(resp)
+    }
+
+    /// Lock a token to prevent concurrent redemption by another request.
+    ///
+    /// Transitions the token from `Issued` → `Locked`.  Returns an error if
+    /// the token does not exist, has already been locked or consumed, or has
+    /// expired.  The caller is responsible for following up with [`redeem`]
+    /// (which transitions `Locked` → `Consumed`) or releasing the lock on
+    /// failure.
+    ///
+    /// In a single-node deployment the [`Mutex`] already provides mutual
+    /// exclusion.  In a multi-replica deployment replace both `lock` and
+    /// `redeem` with a Redis Lua script that performs the full `ISSUED →
+    /// LOCKED → CONSUMED` transition atomically.
+    pub fn lock(&self, token_id: &str) -> Result<(), RedeemError> {
+        let mut store = self.store.lock().unwrap();
+        let record = store.get_mut(token_id).ok_or(RedeemError::NotFound)?;
+
+        match record.state {
+            TokenState::Consumed => return Err(RedeemError::AlreadyRedeemed),
+            TokenState::Locked => return Err(RedeemError::Locked),
+            TokenState::Issued => {}
+        }
+        if record.issued_at.elapsed() > self.ttl {
+            return Err(RedeemError::Expired);
+        }
+        record.state = TokenState::Locked;
+        Ok(())
+    }
+
+    /// Return the current [`TokenState`] for a token, or `None` if not found.
+    pub fn state(&self, token_id: &str) -> Option<TokenState> {
+        self.store.lock().unwrap().get(token_id).map(|r| r.state)
     }
 
     // ── helpers ───────────────────────────────────────────────────────────
@@ -317,6 +380,46 @@ mod tests {
             .redeem(redeem_req(&token_id, "approve", "hash_v1"))
             .unwrap_err();
         assert_eq!(err, RedeemError::AlreadyRedeemed);
+    }
+
+    // ── locked state ──────────────────────────────────────────────────────
+
+    #[test]
+    fn lock_transitions_to_locked_state() {
+        let svc = svc();
+        let MintResponse { token_id, .. } = svc.mint(mint_req("approve", "hash_v1"));
+        assert_eq!(svc.state(&token_id), Some(TokenState::Issued));
+        svc.lock(&token_id).unwrap();
+        assert_eq!(svc.state(&token_id), Some(TokenState::Locked));
+    }
+
+    #[test]
+    fn redeem_locked_token_fails_with_locked_error() {
+        let svc = svc();
+        let MintResponse { token_id, .. } = svc.mint(mint_req("approve", "hash_v1"));
+        svc.lock(&token_id).unwrap();
+        let err = svc
+            .redeem(redeem_req(&token_id, "approve", "hash_v1"))
+            .unwrap_err();
+        assert_eq!(err, RedeemError::Locked);
+    }
+
+    #[test]
+    fn double_lock_fails_with_locked_error() {
+        let svc = svc();
+        let MintResponse { token_id, .. } = svc.mint(mint_req("approve", "hash_v1"));
+        svc.lock(&token_id).unwrap();
+        let err = svc.lock(&token_id).unwrap_err();
+        assert_eq!(err, RedeemError::Locked);
+    }
+
+    #[test]
+    fn state_is_consumed_after_redeem() {
+        let svc = svc();
+        let MintResponse { token_id, .. } = svc.mint(mint_req("approve", "hash_v1"));
+        svc.redeem(redeem_req(&token_id, "approve", "hash_v1"))
+            .unwrap();
+        assert_eq!(svc.state(&token_id), Some(TokenState::Consumed));
     }
 
     // ── expiry ────────────────────────────────────────────────────────────

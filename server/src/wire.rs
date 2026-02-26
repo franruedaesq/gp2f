@@ -155,6 +155,32 @@ fn default_ast_version() -> String {
     "1.0.0".to_owned()
 }
 
+/// Request body for `POST /ai/feedback` – logs dismissed or unhelpful AI suggestions.
+///
+/// Callers send this when the user dismisses an AI-generated proposal so the
+/// backend can record the signal for future retraining / drift detection.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct AiFeedbackRequest {
+    /// Tenant that owns the workflow instance.
+    #[serde(default)]
+    pub tenant_id: String,
+    /// Workflow definition identifier.
+    #[serde(default)]
+    pub workflow_id: String,
+    /// Specific workflow instance identifier.
+    #[serde(default)]
+    pub instance_id: String,
+    /// The `op_id` of the AI-generated proposal being dismissed.
+    pub op_id: String,
+    /// Human-readable reason for dismissal (e.g. `"wrong_tool"`, `"not_helpful"`).
+    #[serde(default)]
+    pub reason: String,
+    /// Optional behavioral signal at the time of dismissal.
+    #[serde(default)]
+    pub vibe: Option<VibeVector>,
+}
+
 // ── conversions ───────────────────────────────────────────────────────────────
 
 impl From<policy_core::FieldStrategy> for FieldConflictStrategy {
