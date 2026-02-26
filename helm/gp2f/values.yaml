@@ -1,0 +1,129 @@
+# Default values for the gp2f Helm chart.
+# Override with: helm install gp2f ./helm/gp2f -f my-values.yaml
+
+# ── server ────────────────────────────────────────────────────────────────────
+server:
+  replicaCount: 3
+
+  image:
+    repository: gp2f/server
+    pullPolicy: IfNotPresent
+    tag: "1.0.0"
+
+  service:
+    type: ClusterIP
+    port: 3000
+
+  ingress:
+    enabled: false
+    className: nginx
+    annotations: {}
+    hosts:
+      - host: gp2f.example.com
+        paths:
+          - path: /
+            pathType: Prefix
+    tls: []
+
+  resources:
+    requests:
+      cpu: "250m"
+      memory: "256Mi"
+    limits:
+      cpu: "1000m"
+      memory: "512Mi"
+
+  env:
+    RUST_LOG: "info"
+    # Set via a Secret in production:
+    # OPENAI_API_KEY, ANTHROPIC_API_KEY, GROQ_API_KEY
+    # TEMPORAL_ENDPOINT, TEMPORAL_NAMESPACE
+
+  envFrom: []
+  # - secretRef:
+  #     name: gp2f-secrets
+
+  # Horizontal Pod Autoscaler
+  autoscaling:
+    enabled: true
+    minReplicas: 3
+    maxReplicas: 20
+    targetCPUUtilizationPercentage: 70
+    targetMemoryUtilizationPercentage: 80
+
+  podDisruptionBudget:
+    enabled: true
+    minAvailable: 2
+
+  livenessProbe:
+    httpGet:
+      path: /health
+      port: 3000
+    initialDelaySeconds: 10
+    periodSeconds: 15
+
+  readinessProbe:
+    httpGet:
+      path: /health
+      port: 3000
+    initialDelaySeconds: 5
+    periodSeconds: 10
+
+  affinity: {}
+  tolerations: []
+  nodeSelector: {}
+
+# ── worker (Temporal activity worker) ────────────────────────────────────────
+worker:
+  enabled: true
+  replicaCount: 2
+
+  image:
+    repository: gp2f/worker
+    pullPolicy: IfNotPresent
+    tag: "1.0.0"
+
+  resources:
+    requests:
+      cpu: "250m"
+      memory: "256Mi"
+    limits:
+      cpu: "1000m"
+      memory: "512Mi"
+
+  env:
+    RUST_LOG: "info"
+    TEMPORAL_NAMESPACE: "gp2f-prod"
+
+  envFrom: []
+
+  autoscaling:
+    enabled: true
+    minReplicas: 2
+    maxReplicas: 10
+    targetCPUUtilizationPercentage: 70
+
+# ── feature flags (canary rollout) ────────────────────────────────────────────
+canary:
+  # Global AI feature flag (per-tenant overrides are set via the API).
+  aiEnabled: true
+  # Failure-rate threshold for automatic rollback (percentage, e.g. 0.1 = 0.1 %).
+  rollbackThresholdPercent: 0.1
+  # Rolling window for failure-rate calculation (seconds).
+  windowSeconds: 300
+
+# ── secrets (set in production via external-secrets or vault-agent) ──────────
+secrets:
+  create: false
+  name: gp2f-secrets
+  data: {}
+  # openaiApiKey: ""
+  # anthropicApiKey: ""
+  # groqApiKey: ""
+  # temporalEndpoint: ""
+
+# ── service account ───────────────────────────────────────────────────────────
+serviceAccount:
+  create: true
+  annotations: {}
+  name: ""

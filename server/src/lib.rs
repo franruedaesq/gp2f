@@ -1,9 +1,11 @@
 pub mod actor;
 pub mod broadcast;
+pub mod canary;
 pub mod chaos;
 pub mod event_store;
 pub mod handlers;
 pub mod limits;
+pub mod llm_audit;
 pub mod llm_provider;
 pub mod middleware;
 pub mod pilot_workflows;

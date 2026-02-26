@@ -1,0 +1,21 @@
+apiVersion: v2
+name: gp2f
+description: |
+  GP2F – Graceful Pessimistic 2-Phase Finaliser.
+  A zero-trust, AI-assisted reconciliation server with Temporal event sourcing.
+type: application
+version: 1.0.0
+appVersion: "1.0.0"
+keywords:
+  - crdt
+  - reconciliation
+  - ai
+  - temporal
+  - websocket
+home: https://github.com/franruedaesq/gp2f
+sources:
+  - https://github.com/franruedaesq/gp2f
+maintainers:
+  - name: GP2F Contributors
+    email: gp2f@github.com
+dependencies: []

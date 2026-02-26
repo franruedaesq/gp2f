@@ -41,3 +41,9 @@ redis = { version = "0.27", features = ["aio", "tokio-comp", "connection-manager
 async-trait = "0.1"
 # HTTP client for LLM provider calls
 reqwest = { version = "0.12", features = ["json"] }
+
+[dev-dependencies]
+# Wiremock for mocking HTTP endpoints in integration tests
+wiremock = "0.6"
+tokio = { version = "1", features = ["full"] }
+serde_json = "1"
