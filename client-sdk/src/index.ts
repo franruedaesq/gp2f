@@ -69,13 +69,17 @@ let _policyEngineCache: PolicyEngineModule | null = null;
  * to emit this as a separate chunk so it is only downloaded on demand.
  */
 async function _importPolicyEngine(): Promise<PolicyEngineModule> {
-  // Dynamic import – bundlers will split this into a separate chunk.
-  // We use a try/catch so that the SDK remains usable even when the optional
-  // @gp2f/policy-core-wasm peer package is not installed.
+  // We intentionally defeat static import analysis by building the specifier
+  // at runtime.  Vite / Rollup / webpack resolve bare string literals in
+  // dynamic imports at *build time*, before any try/catch can help.  A computed
+  // expression is invisible to those static passes, so the try/catch below
+  // actually runs at runtime when the package is absent.
+  //
+  // If @gp2f/policy-core-wasm IS installed, this resolves normally.
+  // If it is NOT installed, the runtime import() throws and we return the stub.
+  const specifier = /* @vite-ignore */ "@gp2f/" + "policy-core-wasm";
   try {
-    // @ts-expect-error: @gp2f/policy-core-wasm is an optional peer package
-    // that may not be installed.  The try/catch below handles the absence case.
-    const mod = await import(/* webpackChunkName: "policy-engine" */ "@gp2f/policy-core-wasm");
+    const mod = await import(/* @vite-ignore */ specifier);
     return mod as PolicyEngineModule;
   } catch {
     // WASM package not installed – return a stub that always delegates to the
