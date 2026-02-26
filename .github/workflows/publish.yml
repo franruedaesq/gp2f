@@ -64,7 +64,7 @@ jobs:
           APP_NAME: ${{ env.APP_NAME }}
 
       - name: Upload artifact
-        uses: actions/upload-artifact@v3
+        uses: actions/upload-artifact@v4
         with:
           name: bindings-${{ matrix.settings.target }}
           path: gp2f-node/${{ env.APP_NAME }}.*.node
@@ -88,7 +88,7 @@ jobs:
         run: npm install
 
       - name: Download all artifacts
-        uses: actions/download-artifact@v3
+        uses: actions/download-artifact@v4
         with:
           path: gp2f-node/artifacts
 
