@@ -10,6 +10,10 @@ description = "GP2F Axum-based reconciliation server"
 name = "gp2f-server"
 path = "src/main.rs"
 
+[features]
+wasmtime-engine = ["dep:wasmtime", "dep:prost"]
+redis-broadcast = ["dep:redis"]
+
 [dependencies]
 policy-core = { path = "../policy-core" }
 serde.workspace = true
@@ -25,3 +29,13 @@ tracing-subscriber = { version = "0.3", features = ["env-filter"] }
 hmac-sha256 = "1.1"
 base64 = "0.22"
 chrono.workspace = true
+# ed25519 signatures for cryptographic op_id middleware
+ed25519-dalek = { version = "2", features = ["rand_core"] }
+rand = "0.8"
+# optional: Wasmtime WASM policy engine
+wasmtime = { version = "28", optional = true }
+prost = { version = "0.13", optional = true }
+# optional: Redis PubSub broadcaster
+redis = { version = "0.27", features = ["aio", "tokio-comp", "connection-manager"], optional = true }
+# async trait support (used by temporal_store)
+async-trait = "0.1"
