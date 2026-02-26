@@ -52,19 +52,21 @@ The policy engine uses vibe to proactively unlock AI assistance.
 ## C4 Context Diagram
 
 ```
-┌─────────────────────────────────────────────────────────────┐
-│                        GP2F System                          │
-│                                                             │
-│  ┌──────────┐     ┌──────────────┐     ┌────────────────┐  │
-│  │  Client  │────▶│  WebSocket   │────▶│  Axum Server   │  │
-│  │ (WASM +  │◀────│   Channel    │◀────│ (Reconciler)   │  │
-│  │   TS)    │     └──────────────┘     └───────┬────────┘  │
-│  └──────────┘                                  │            │
-│                                     ┌──────────▼──────────┐ │
-│                                     │  Temporal Workflow  │ │
-│                                     │  (Append-only log)  │ │
-│                                     └─────────────────────┘ │
-└─────────────────────────────────────────────────────────────┘
+┌─────────────────────────────────────────────────────────────────────┐
+│                           GP2F System                               │
+│                                                                     │
+│  ┌──────────┐     ┌──────────────┐     ┌────────────────────────┐  │
+│  │  Client  │────▶│  WebSocket   │────▶│    Axum Server         │  │
+│  │ (WASM +  │◀────│   Channel    │◀────│  (gp2f-actor/server)   │  │
+│  │   TS)    │     └──────────────┘     └──────────┬─────────────┘  │
+│  └──────────┘                                     │                 │
+│                          ┌────────────────────────┤                 │
+│                          │                        │                 │
+│               ┌──────────▼──────┐    ┌────────────▼────────────┐   │
+│               │  gp2f-crdt      │    │  gp2f-store             │   │
+│               │  (Reconciler)   │    │  (Postgres / Temporal)  │   │
+│               └─────────────────┘    └─────────────────────────┘   │
+└─────────────────────────────────────────────────────────────────────┘
 ```
 
 ---
@@ -74,7 +76,7 @@ The policy engine uses vibe to proactively unlock AI assistance.
 ```
 gp2f/
 ├── proto/              # Protobuf definitions (ASTNode, OpId, wire protocol)
-├── policy-core/        # Pure Rust AST evaluator (no I/O)
+├── policy-core/        # Pure Rust AST evaluator (no I/O, compilable to WASM)
 │   ├── src/
 │   │   ├── ast.rs      # AstNode + NodeKind types
 │   │   ├── evaluator.rs# Evaluator::evaluate() + unit tests
@@ -82,23 +84,32 @@ gp2f/
 │   │   └── version.rs  # VersionPolicy (allow-list for AST versions)
 │   └── tests/
 │       └── property_tests.rs  # proptest: random state × random AST
+├── gp2f-core/          # Shared wire types (ClientMessage, VibeVector, HLC timestamps)
+├── gp2f-security/      # RBAC, HMAC signature validation, replay protection, secrets
+├── gp2f-store/         # Append-only event store (in-memory, Postgres, Temporal backends)
+├── gp2f-broadcast/     # ACCEPT/REJECT broadcaster (tokio channels; Redis-ready)
+├── gp2f-token/         # Ephemeral AI agent token service with rate limiting
+├── gp2f-crdt/          # CRDT-based conflict-free state reconciler
+├── gp2f-actor/         # Per-instance actor model (serialises ops; Redis cluster coordination)
+├── gp2f-workflow/      # WorkflowDefinition + WorkflowInstance + built-in pilot workflows
+├── gp2f-vibe/          # Semantic Vibe classifier + LLM provider abstraction + LLM audit log
+├── gp2f-runtime/       # Wasmtime-based WASM engine for isomorphic policy evaluation
+├── gp2f-ingest/        # Async ingestion queue (< 1 ms HTTP ack; result via WebSocket push)
+├── gp2f-api/           # Shared HTTP handler utilities, middleware, and tool-gating
+├── gp2f-canary/        # Replay-based canary test suite for determinism regression detection
 ├── server/             # Axum HTTP + WebSocket reconciliation server
 │   └── src/
-│       ├── wire.rs     # ClientMessage / AcceptResponse / RejectResponse
-│       ├── reconciler.rs  # Stateful reconciler (append-only log)
-│       ├── rbac.rs        # Role-based access control
-│       ├── event_store.rs # Append-only partitioned event log
-│       ├── token_service.rs # Ephemeral AI agent tokens
-│       ├── pilot_workflows.rs # Built-in workflow definitions
-│       └── workflow.rs    # WorkflowDefinition + WorkflowInstance
+│       └── main.rs     # Routes, AppState, all HTTP/WS handlers
 ├── gp2f-node/          # Native Node.js bindings (@gp2f/server) via napi-rs
 │   ├── src/
 │   │   ├── policy.rs   # evaluate / evaluateWithTrace bindings
 │   │   ├── workflow.rs # Workflow class bindings
 │   │   └── server.rs   # GP2FServer class bindings
 │   └── index.d.ts      # TypeScript declarations (auto-generated)
-├── client-sdk/         # TypeScript npm package
+├── client-sdk/         # TypeScript npm package (@gp2f/client-sdk)
 ├── cli/                # gp2f eval / replay binaries
+├── migrations/         # PostgreSQL schema migrations (apply in order)
+├── helm/               # Helm chart for Kubernetes deployment
 └── docs/               # This file + wire-protocol.md + ADRs
 ```
 
