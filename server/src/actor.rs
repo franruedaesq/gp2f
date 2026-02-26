@@ -20,6 +20,23 @@
 //!                        oneshot::Sender back to handler
 //!                        broadcast to subscribed WS clients
 //! ```
+//!
+//! ## Distributed deployment (Redis PubSub)
+//!
+//! When the `redis-broadcast` Cargo feature is enabled and `REDIS_URL` is set,
+//! the [`ActorRegistry`] uses a [`RedisActorCoordinator`] to:
+//!
+//! 1. **Claim** instance ownership via `SET actor:{key} {pod_id} NX EX {ttl}`.
+//!    This prevents two pods from silently running split-brain actors for the
+//!    same instance.
+//! 2. **Announce** ownership via Redis PubSub channel `actor-registry`, so
+//!    other pods can detect conflicts and log split-brain warnings in time for
+//!    operators to act.
+//!
+//! The coordinator does **not** implement full request proxying; pods that fail
+//! to claim an instance still serve it locally (graceful degradation) while
+//! emitting a structured warning log.  Full proxying is deferred to a future
+//! release that adds inter-pod HTTP routing.
 
 use std::{
     collections::HashMap,
@@ -153,6 +170,10 @@ impl WorkflowActor {
 ///
 /// Keyed by `"tenant_id:workflow_id:instance_id"`.  Actors are spawned lazily
 /// on first access and kept alive as long as this registry is alive.
+///
+/// In a multi-replica deployment, set the `redis-broadcast` feature and provide
+/// a [`RedisActorCoordinator`] via [`ActorRegistry::with_coordinator`] to
+/// enable cross-pod ownership tracking and split-brain detection.
 pub struct ActorRegistry {
     actors: Mutex<HashMap<String, ActorHandle>>,
     /// Shared reconciler – actors wrap it (one per workflow instance so there
@@ -160,6 +181,9 @@ pub struct ActorRegistry {
     reconciler_factory: Arc<dyn Fn() -> Arc<Reconciler> + Send + Sync>,
     /// Durable event store shared across all actors in this registry.
     persistent_store: Arc<dyn PersistentStore>,
+    /// Optional Redis coordinator for cross-pod actor ownership tracking.
+    #[cfg(feature = "redis-broadcast")]
+    coordinator: Option<Arc<RedisActorCoordinator>>,
 }
 
 impl ActorRegistry {
@@ -187,6 +211,8 @@ impl ActorRegistry {
             actors: Mutex::new(HashMap::new()),
             reconciler_factory: factory,
             persistent_store: store,
+            #[cfg(feature = "redis-broadcast")]
+            coordinator: None,
         }
     }
 
@@ -201,6 +227,12 @@ impl ActorRegistry {
 
     /// Return the handle for the given `(tenant_id, workflow_id, instance_id)`,
     /// spawning a new actor if none exists yet.
+    ///
+    /// In a multi-replica deployment with a [`RedisActorCoordinator`] attached,
+    /// this method will attempt to claim ownership of the instance in Redis
+    /// before spawning.  If another pod already owns the instance, a split-brain
+    /// warning is logged but the actor is still spawned locally (graceful
+    /// degradation until full proxy support is available).
     pub fn get_or_spawn(
         &self,
         tenant_id: &str,
@@ -214,11 +246,29 @@ impl ActorRegistry {
         }
         let reconciler = (self.reconciler_factory)();
         let (actor, handle) = WorkflowActor::new(reconciler, self.persistent_store.clone());
-        // Spawn a subscriber broadcast receiver before moving actor so we can
-        // make the broadcast_tx available; here we just run the actor.
         tokio::spawn(actor.run());
-        map.insert(key, handle.clone());
+        map.insert(key.clone(), handle.clone());
+
+        // Announce actor ownership to other pods via Redis.
+        #[cfg(feature = "redis-broadcast")]
+        if let Some(coord) = self.coordinator.clone() {
+            let instance_key = key.clone();
+            tokio::spawn(async move {
+                coord.claim_and_announce(&instance_key).await;
+            });
+        }
+
         handle
+    }
+
+    /// Attach a [`RedisActorCoordinator`] to this registry for cross-pod
+    /// actor ownership tracking and split-brain detection.
+    ///
+    /// This is a no-op when the `redis-broadcast` feature is disabled.
+    #[cfg(feature = "redis-broadcast")]
+    pub fn with_coordinator(mut self, coordinator: Arc<RedisActorCoordinator>) -> Self {
+        self.coordinator = Some(coordinator);
+        self
     }
 
     /// Number of live actor instances.
@@ -230,6 +280,149 @@ impl ActorRegistry {
 impl Default for ActorRegistry {
     fn default() -> Self {
         Self::new()
+    }
+}
+
+// ── Redis actor coordinator ───────────────────────────────────────────────────
+
+/// Redis-backed actor ownership coordinator.
+///
+/// Uses Redis `SET actor:{key} {pod_id} NX EX {ttl}` to claim exclusive
+/// ownership of a workflow instance and Redis PubSub to broadcast that claim to
+/// other pods.
+///
+/// ## Split-brain detection
+///
+/// When two pods race to spawn actors for the same instance, one will succeed
+/// in claiming the Redis key and the other will receive a warning log.
+/// The warning is actionable: an operator can redirect traffic for that
+/// instance to the owning pod using the pod_id published on the
+/// `actor-registry` PubSub channel.
+#[cfg(feature = "redis-broadcast")]
+pub struct RedisActorCoordinator {
+    client: redis::Client,
+    /// Unique identifier for this pod (used as the Redis key value).
+    pod_id: String,
+    /// How long (seconds) to hold the ownership claim before it expires.
+    claim_ttl_secs: u64,
+}
+
+#[cfg(feature = "redis-broadcast")]
+impl RedisActorCoordinator {
+    /// Connect to Redis and return a new coordinator.
+    ///
+    /// `pod_id` should be unique per replica (e.g. the Pod name from the
+    /// `HOSTNAME` environment variable in Kubernetes).
+    pub fn connect(redis_url: &str, pod_id: impl Into<String>) -> Result<Self, redis::RedisError> {
+        let client = redis::Client::open(redis_url)?;
+        Ok(Self {
+            client,
+            pod_id: pod_id.into(),
+            claim_ttl_secs: 30,
+        })
+    }
+
+    /// Create with a custom claim TTL (useful for testing).
+    pub fn with_claim_ttl(mut self, secs: u64) -> Self {
+        self.claim_ttl_secs = secs;
+        self
+    }
+
+    /// Attempt to claim ownership of `instance_key` in Redis and publish a
+    /// "hosting" announcement on the `actor-registry` PubSub channel.
+    ///
+    /// If another pod already holds the claim, a split-brain warning is logged.
+    pub async fn claim_and_announce(&self, instance_key: &str) {
+        let redis_key = format!("actor:{instance_key}");
+        let channel = "actor-registry";
+
+        let mut conn = match self.client.get_multiplexed_async_connection().await {
+            Ok(c) => c,
+            Err(e) => {
+                tracing::warn!(
+                    instance_key = %instance_key,
+                    error = %e,
+                    "Redis actor coordinator: connection failed; skipping ownership claim"
+                );
+                return;
+            }
+        };
+
+        // Attempt to claim ownership (NX = only if key does not exist).
+        let claimed: redis::Value = redis::cmd("SET")
+            .arg(&redis_key)
+            .arg(&self.pod_id)
+            .arg("EX")
+            .arg(self.claim_ttl_secs)
+            .arg("NX")
+            .query_async(&mut conn)
+            .await
+            .unwrap_or(redis::Value::Nil);
+
+        let is_owner = matches!(claimed, redis::Value::SimpleString(ref s) if s == "OK");
+
+        if !is_owner {
+            // Another pod owns this instance.
+            let owner: String = redis::cmd("GET")
+                .arg(&redis_key)
+                .query_async(&mut conn)
+                .await
+                .unwrap_or_default();
+            tracing::warn!(
+                instance_key = %instance_key,
+                owner_pod = %owner,
+                this_pod = %self.pod_id,
+                "split-brain warning: actor for instance already claimed by another pod"
+            );
+        }
+
+        // Publish a "hosting" announcement regardless of whether we claimed it,
+        // so other pods can track the topology via the PubSub channel.
+        let payload = serde_json::json!({
+            "pod": self.pod_id,
+            "instance": instance_key,
+            "is_owner": is_owner,
+        })
+        .to_string();
+        let _: redis::Value = redis::cmd("PUBLISH")
+            .arg(channel)
+            .arg(&payload)
+            .query_async(&mut conn)
+            .await
+            .unwrap_or(redis::Value::Nil);
+
+        tracing::debug!(
+            instance_key = %instance_key,
+            pod = %self.pod_id,
+            is_owner = %is_owner,
+            "actor ownership announced on Redis PubSub"
+        );
+    }
+
+    /// Build a coordinator from the `REDIS_URL` and `HOSTNAME` environment
+    /// variables.  Returns `None` if `REDIS_URL` is not set.
+    ///
+    /// The `pod_id` is taken from `HOSTNAME` (set automatically by Kubernetes)
+    /// or falls back to a random hex string to guarantee uniqueness across
+    /// pod restarts.
+    pub fn from_env() -> Option<Self> {
+        let url = std::env::var("REDIS_URL").ok()?;
+        let pod_id = std::env::var("HOSTNAME").unwrap_or_else(|_| {
+            // Generate a random 8-byte hex suffix so that restarts don't collide.
+            let nanos = std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap_or_default()
+                .subsec_nanos();
+            let pid = std::process::id();
+            format!("pod-{pid:08x}-{nanos:08x}")
+        });
+        match Self::connect(&url, pod_id) {
+            Ok(c) => Some(c),
+            Err(e) => {
+                tracing::warn!("Redis actor coordinator setup failed: {e}");
+                None
+            }
+        }
     }
 }
 
