@@ -1,10 +1,6 @@
 // In no_std + alloc mode, bring heap types into scope.
 #[cfg(not(feature = "std"))]
-use alloc::{
-    borrow::ToOwned,
-    string::String,
-    vec::Vec,
-};
+use alloc::{borrow::ToOwned, string::String, vec::Vec};
 
 use thiserror::Error;
 
