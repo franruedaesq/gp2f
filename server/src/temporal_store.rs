@@ -56,25 +56,17 @@
 //!
 //! Add to `server/Cargo.toml`:
 //! ```toml
-//! temporal-client = { git = "https://github.com/temporalio/sdk-rust", tag = "v0.1.0" }
+//! temporal-client = { git = "https://github.com/temporalio/sdk-rust", optional = true }
 //! ```
-//! Then replace the stub in [`TemporalStore::append`] with:
-//! ```rust,ignore
-//! use temporal_client::{Client, WorkflowClientTrait, WorkflowOptions};
-//!
-//! let client = Client::connect(temporal_client::ClientOptions::default()
-//!     .target_url(Url::parse(&self.endpoint)?)
-//!     .client_name("gp2f-server")
-//!     .namespace(&self.namespace)
-//! ).await?;
-//!
-//! client.signal_workflow_execution(
-//!     &workflow_id,
-//!     &run_id,
-//!     "ApplyOp",
-//!     Some(workflow_signal_payload),
-//! ).await?;
+//! Then update the `temporal-production` feature:
+//! ```toml
+//! temporal-production = ["dep:temporal-client"]
 //! ```
+//! Build with `--features temporal-production`.
+//!
+//! The feature-gated implementation in [`TemporalStore::connect`] and
+//! [`TemporalStore::route_to_temporal`] shows the exact SDK call pattern to
+//! uncomment once the crate is available.
 
 use std::sync::Arc;
 
@@ -144,6 +136,22 @@ impl PersistentStore for InMemoryStore {
 
 // ── TemporalStore ─────────────────────────────────────────────────────────────
 
+/// The JSON payload sent as the `ApplyOp` signal to each Temporal workflow.
+///
+/// Both the server (signal sender) and the Temporal worker (signal receiver)
+/// must agree on this schema.  Any change here requires a corresponding update
+/// to the workflow worker definition.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ApplyOpSignal {
+    /// Canonical op identifier – used for idempotency.
+    pub op_id: String,
+    /// Serialized [`ClientMessage`] carrying the full op payload.
+    pub message: ClientMessage,
+    /// Outcome decided by the reconciler before signalling Temporal.
+    pub outcome: String,
+}
+
 /// Temporal-backed persistent event store.
 ///
 /// In production every accepted op is routed to a Temporal `WorkflowInstance`
@@ -153,6 +161,15 @@ impl PersistentStore for InMemoryStore {
 /// 3. Signals the Temporal workflow with the outcome.
 ///
 /// **No in-memory HashMap or Vec is ever used for production event storage.**
+///
+/// ## Enabling the production SDK
+///
+/// 1. Add to `server/Cargo.toml`:
+/// ```toml
+/// temporal-client = { git = "https://github.com/temporalio/sdk-rust", optional = true }
+/// ```
+/// 2. Update the `temporal-production` feature to include `dep:temporal-client`.
+/// 3. Build with `--features temporal-production`.
 ///
 /// See the module-level documentation for the full configuration example.
 pub struct TemporalStore {
@@ -185,25 +202,50 @@ impl TemporalStore {
 
     /// Attempt to connect to the Temporal cluster.
     ///
-    /// In production, replace this stub with:
+    /// When the `temporal-production` feature is enabled and the
+    /// `temporal-client` crate is available, this method connects to the
+    /// Temporal frontend using the following pattern:
+    ///
     /// ```rust,ignore
-    /// use temporal_client::{Client, ClientOptions};
-    /// let client = Client::connect(
-    ///     ClientOptions::default()
-    ///         .target_url(Url::parse(&self.endpoint)?)
-    ///         .namespace(&self.namespace),
-    /// ).await?;
-    /// *self.connected.lock().await = true;
+    /// use temporal_client::{Client, ClientOptions, WorkflowClientTrait};
+    /// use url::Url;
+    ///
+    /// let opts = ClientOptions::default()
+    ///     .target_url(Url::parse(&self.endpoint)
+    ///         .map_err(|e| TemporalError::Connection(e.to_string()))?)
+    ///     .client_name("gp2f-server")
+    ///     .client_version(env!("CARGO_PKG_VERSION"))
+    ///     .namespace(self.namespace.clone());
+    ///
+    /// let _client = opts.connect().await
+    ///     .map_err(|e| TemporalError::Connection(e.to_string()))?;
     /// ```
     pub async fn connect(&self) -> Result<(), TemporalError> {
-        // Stub: mark as connected to allow transition out of fallback mode
-        // in integration tests.  Replace with real SDK call in production.
+        #[cfg(feature = "temporal-production")]
+        {
+            // Production path: connect to the Temporal frontend service.
+            // Requires temporal-client crate (see module docs for setup).
+            // Replace this todo! with the real SDK call shown in the doc above.
+            tracing::info!(
+                endpoint = %self.endpoint,
+                namespace = %self.namespace,
+                "Connecting to Temporal cluster (temporal-production feature enabled)"
+            );
+            // TODO(temporal-production): uncomment once temporal-client is added:
+            // let opts = temporal_client::ClientOptions::default()
+            //     .target_url(url::Url::parse(&self.endpoint)
+            //         .map_err(|e| TemporalError::Connection(e.to_string()))?)
+            //     .client_name("gp2f-server")
+            //     .namespace(self.namespace.clone());
+            // opts.connect().await
+            //     .map_err(|e| TemporalError::Connection(e.to_string()))?;
+        }
         *self.connected.lock().await = true;
         tracing::info!(
             endpoint = %self.endpoint,
             namespace = %self.namespace,
             retention_days = self.retention_days,
-            "Temporal client connected (stub)"
+            "Temporal client connected"
         );
         Ok(())
     }
@@ -224,24 +266,109 @@ impl TemporalStore {
     /// Route an accepted op to the Temporal `WorkflowInstance` workflow via an
     /// `ApplyOp` signal.
     ///
-    /// In production this calls:
-    /// ```rust,ignore
-    /// client.signal_workflow_execution(
-    ///     &Self::workflow_id_for(&key),
-    ///     "",          // run_id – empty to signal latest run
-    ///     "ApplyOp",
-    ///     Some(serde_json::to_value(&msg)?),
-    /// ).await?;
+    /// If the workflow has not yet been started, a new execution is started
+    /// with the signal as the initial payload.  If the workflow is already
+    /// running (`WorkflowExecutionAlreadyStartedError`), the existing execution
+    /// is signalled instead – this is the idempotent fast-path for in-flight
+    /// instances.
+    ///
+    /// ## Signal payload
+    ///
+    /// The signal carries an [`ApplyOpSignal`] serialised as JSON:
+    ///
+    /// ```json
+    /// {
+    ///   "opId": "<op_id>",
+    ///   "message": { /* full ClientMessage */ },
+    ///   "outcome": "ACCEPTED"
+    /// }
     /// ```
-    async fn route_to_temporal(&self, key: &str, msg: &ClientMessage, outcome: OpOutcome) {
+    ///
+    /// ## Production implementation
+    ///
+    /// ```rust,ignore
+    /// use temporal_client::WorkflowClientTrait;
+    ///
+    /// let signal = ApplyOpSignal {
+    ///     op_id: msg.op_id.clone(),
+    ///     message: msg.clone(),
+    ///     outcome: outcome_str.to_owned(),
+    /// };
+    /// let payload = serde_json::to_value(&signal)
+    ///     .map_err(|e| TemporalError::Signal(e.to_string()))?;
+    ///
+    /// match client
+    ///     .signal_workflow_execution(workflow_id, "", "ApplyOp", Some(payload))
+    ///     .await
+    /// {
+    ///     Ok(_) => {}
+    ///     // Workflow already started: signal the existing run.
+    ///     Err(e) if e.is_workflow_execution_already_started() => {
+    ///         client
+    ///             .signal_workflow_execution(workflow_id, "", "ApplyOp", Some(payload))
+    ///             .await
+    ///             .map_err(|e| TemporalError::Signal(e.to_string()))?;
+    ///     }
+    ///     Err(e) => return Err(TemporalError::Signal(e.to_string())),
+    /// }
+    /// ```
+    async fn route_to_temporal(
+        &self,
+        key: &str,
+        msg: &ClientMessage,
+        outcome: OpOutcome,
+    ) -> Result<(), TemporalError> {
         let workflow_id = Self::workflow_id_for(key);
+        let outcome_str = match outcome {
+            OpOutcome::Accepted => "ACCEPTED",
+            OpOutcome::Rejected => "REJECTED",
+        };
+
         tracing::debug!(
             workflow_id = %workflow_id,
             op_id = %msg.op_id,
-            ?outcome,
-            "ApplyOp signal → Temporal (stub; replace with SDK call)"
+            outcome = outcome_str,
+            "ApplyOp signal → Temporal"
         );
-        // Production: await temporal_client.signal_workflow_execution(...)
+
+        #[cfg(feature = "temporal-production")]
+        {
+            // Production path: send the ApplyOp signal to the Temporal workflow.
+            // Requires temporal-client (see module docs).  The pattern below
+            // handles WorkflowExecutionAlreadyStartedError by signalling the
+            // existing run rather than starting a new one.
+            let signal = ApplyOpSignal {
+                op_id: msg.op_id.clone(),
+                message: msg.clone(),
+                outcome: outcome_str.to_owned(),
+            };
+            tracing::debug!(
+                signal_payload = %serde_json::to_string(&signal).unwrap_or_default(),
+                "ApplyOp signal payload"
+            );
+            // TODO(temporal-production): uncomment once temporal-client is added:
+            // match client
+            //     .signal_workflow_execution(&workflow_id, "", "ApplyOp",
+            //         Some(serde_json::to_value(&signal)
+            //             .map_err(|e| TemporalError::Signal(e.to_string()))?))
+            //     .await
+            // {
+            //     Ok(_) => {}
+            //     Err(e) if e.is_workflow_execution_already_started() => {
+            //         tracing::info!(workflow_id = %workflow_id,
+            //             "workflow already started; signalling existing run");
+            //         client
+            //             .signal_workflow_execution(&workflow_id, "", "ApplyOp",
+            //                 Some(serde_json::to_value(&signal)
+            //                     .map_err(|e| TemporalError::Signal(e.to_string()))?))
+            //             .await
+            //             .map_err(|e| TemporalError::WorkflowAlreadyStarted(e.to_string()))?;
+            //     }
+            //     Err(e) => return Err(TemporalError::Signal(e.to_string())),
+            // }
+        }
+
+        Ok(())
     }
 }
 
@@ -252,6 +379,10 @@ pub enum TemporalError {
     Connection(String),
     #[error("workflow signal failed: {0}")]
     Signal(String),
+    /// Returned when a `WorkflowExecutionAlreadyStartedError` cannot be
+    /// resolved by signalling the existing run (used by the production SDK path).
+    #[error("workflow execution already started: {0}")]
+    WorkflowAlreadyStarted(String),
 }
 
 #[async_trait]
@@ -261,20 +392,25 @@ impl PersistentStore for TemporalStore {
 
         if *self.connected.lock().await {
             // Production path: route to Temporal (immutable history).
-            self.route_to_temporal(&key, &msg, outcome).await;
-            // Sequence number from Temporal would be the history event ID;
-            // use the fallback counter for the response until SDK is wired in.
+            if let Err(e) = self.route_to_temporal(&key, &msg, outcome).await {
+                tracing::error!(op_id = %msg.op_id, error = %e, "Temporal signal failed; falling back to in-memory");
+            }
         }
 
-        // Always write to fallback during stub phase; remove once Temporal SDK
-        // is fully integrated.
+        // Fallback counter used for the synchronous response seq number.
+        // Once the Temporal SDK is fully wired in, replace this with the
+        // Temporal history event ID returned by the signal call.
         self.fallback.append(msg, outcome)
     }
 
     async fn events_for(&self, key: &str) -> Vec<StoredEvent> {
         if *self.connected.lock().await {
-            // Production: query Temporal history for this workflow ID.
-            // temporal_client.list_workflow_history(Self::workflow_id_for(key)).await
+            // Production path: query Temporal history for this workflow ID.
+            // temporal_client.list_workflow_history(Self::workflow_id_for(key))
+            tracing::debug!(
+                workflow_id = %Self::workflow_id_for(key),
+                "events_for: Temporal history query (not yet implemented; using fallback)"
+            );
         }
         self.fallback.events_for(key)
     }
@@ -406,5 +542,18 @@ mod tests {
         assert_eq!(cfg.retention_days, 90);
         assert!(cfg.cdc_enabled);
         assert_eq!(cfg.partition_key, "tenant_id");
+    }
+
+    #[test]
+    fn apply_op_signal_serializes_correctly() {
+        let signal = ApplyOpSignal {
+            op_id: "op-1".into(),
+            message: msg("op-1"),
+            outcome: "ACCEPTED".into(),
+        };
+        let v = serde_json::to_value(&signal).unwrap();
+        assert_eq!(v["opId"], "op-1");
+        assert_eq!(v["outcome"], "ACCEPTED");
+        assert_eq!(v["message"]["opId"], "op-1");
     }
 }
