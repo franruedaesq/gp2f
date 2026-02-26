@@ -1,11 +1,11 @@
 pub mod actor;
-pub mod hlc;
 pub mod async_ingestion;
 pub mod broadcast;
 pub mod canary;
 pub mod chaos;
 pub mod event_store;
 pub mod handlers;
+pub mod hlc;
 pub mod limits;
 pub mod llm_audit;
 pub mod llm_provider;

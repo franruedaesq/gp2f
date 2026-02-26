@@ -90,7 +90,9 @@ impl Hlc {
         let remote_wall = hlc_wall_ms(remote);
         let max_wall = wall_ms.max(last_wall).max(remote_wall);
         let logical = if max_wall == last_wall && max_wall == remote_wall {
-            hlc_logical(*last).max(hlc_logical(remote)).saturating_add(1)
+            hlc_logical(*last)
+                .max(hlc_logical(remote))
+                .saturating_add(1)
         } else if max_wall == last_wall {
             hlc_logical(*last).saturating_add(1)
         } else if max_wall == remote_wall {
