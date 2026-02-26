@@ -363,7 +363,17 @@ impl TokenStore for TokenService {
 ///
 /// When `REDIS_URL` is set and the `redis-broadcast` feature is enabled,
 /// connects to Redis; otherwise falls back to the in-process token service.
+///
+/// In production (`APP_ENV=production`) with `redis-broadcast` enabled, a
+/// Redis URL that is present but fails to connect will cause a panic rather
+/// than a silent fallback to in-memory storage.  Tokens in the in-memory store
+/// are not shared across replicas, so any replica restart or scale-out event
+/// would invalidate all outstanding tokens, breaking the single-use guarantee.
 pub async fn build_token_store() -> DynTokenStore {
+    let is_production = std::env::var("APP_ENV")
+        .map(|v| v.eq_ignore_ascii_case("production"))
+        .unwrap_or(false);
+
     #[cfg(feature = "redis-broadcast")]
     if let Some(url) = crate::secrets::resolve_secret("REDIS_URL") {
         match RedisTokenStore::connect(&url) {
@@ -372,6 +382,28 @@ pub async fn build_token_store() -> DynTokenStore {
                 return Arc::new(store);
             }
             Err(e) => {
+                if is_production {
+                    // Mask credentials (everything between "://" and "@") so
+                    // the URL is safe to include in logs / panic messages.
+                    let safe_url = {
+                        let s = url.as_str();
+                        if let (Some(at), Some(scheme_end)) =
+                            (s.rfind('@'), s.find("://"))
+                        {
+                            format!("{}://***@{}", &s[..scheme_end], &s[at + 1..])
+                        } else {
+                            url.clone()
+                        }
+                    };
+                    panic!(
+                        "REDIS_URL ({safe_url}) is set but Redis token store connection \
+                         failed: {e}. \
+                         In production the token store must be backed by Redis to guarantee \
+                         cross-replica single-use enforcement. \
+                         Fix the Redis connection or unset APP_ENV=production to allow \
+                         the in-memory fallback."
+                    );
+                }
                 tracing::warn!("Redis token store failed ({e}); falling back to in-memory");
             }
         }

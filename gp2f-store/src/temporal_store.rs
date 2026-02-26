@@ -428,35 +428,23 @@ impl TemporalStore {
                 signal_payload = %serde_json::to_string(&signal).unwrap_or_default(),
                 "ApplyOp signal payload"
             );
-            // TODO: Once temporal-client is wired in, replace the log-only stub below
-            // with the actual gRPC signal call:
+            // The temporal-client SDK is not yet wired in.  Return an explicit
+            // error rather than pretending the signal was delivered.  This
+            // ensures the `append` call fails loudly so operators know that
+            // Temporal durability is not active and no events will be silently
+            // dropped.
             //
-            // match client
-            //     .signal_workflow_execution(&workflow_id, "", "ApplyOp",
-            //         Some(serde_json::to_value(&signal)
-            //             .map_err(|e| TemporalError::Signal(e.to_string()))?))
-            //     .await
-            // {
-            //     Ok(_) => {}
-            //     Err(e) if e.is_workflow_execution_already_started() => {
-            //         tracing::info!(workflow_id = %workflow_id,
-            //             "workflow already started; signalling existing run");
-            //         client
-            //             .signal_workflow_execution(&workflow_id, "", "ApplyOp",
-            //                 Some(serde_json::to_value(&signal)
-            //                     .map_err(|e| TemporalError::Signal(e.to_string()))?))
-            //             .await
-            //             .map_err(|e| TemporalError::WorkflowAlreadyStarted(e.to_string()))?;
-            //     }
-            //     Err(e) => return Err(TemporalError::Signal(e.to_string())),
-            // }
-            tracing::info!(
-                workflow_id = %workflow_id,
-                op_id = %msg.op_id,
-                "ApplyOp signal queued (temporal-client stub – replace with SDK call)"
-            );
+            // To activate: add `temporal-client` to Cargo.toml and replace this
+            // block with the gRPC signal call shown in the doc comment above.
+            return Err(TemporalError::Signal(
+                "temporal-client SDK is not wired in; \
+                 add temporal-client to Cargo.toml and implement the gRPC \
+                 signal call before enabling the temporal-production feature"
+                    .into(),
+            ));
         }
 
+        #[cfg(not(feature = "temporal-production"))]
         Ok(())
     }
 }

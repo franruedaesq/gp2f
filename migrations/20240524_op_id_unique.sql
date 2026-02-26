@@ -1,0 +1,13 @@
+-- Enforce uniqueness on op_id to prevent duplicate event insertion.
+--
+-- op_id is the client-assigned idempotency key carried in every ClientMessage.
+-- Without this constraint a client can submit the same op_id twice (e.g. on
+-- retry after a transient network error) and both rows will be inserted,
+-- corrupting the event log with duplicate operations.
+--
+-- The UNIQUE INDEX causes Postgres to return error code 23505 on a duplicate
+-- insert.  PostgresStore::append already maps 23505 → PersistenceError::Conflict
+-- so callers receive a structured error rather than a generic database error
+-- and can apply idempotent retry logic (i.e. treat Conflict as success when the
+-- previous insert is known to have succeeded).
+CREATE UNIQUE INDEX IF NOT EXISTS idx_event_log_op_id ON event_log (op_id);
