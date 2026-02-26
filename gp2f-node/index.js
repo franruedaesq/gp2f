@@ -38,14 +38,13 @@ function loadNative() {
   )
 }
 
-const nativeAddon = loadNative()
+const { p, PolicyBuilder, FieldBuilder, VibeBuilder } = require('./lib/policy-builder')
 
-module.exports = nativeAddon
+let native
+try {
+  native = loadNative()
+} catch (_) {
+  native = {}
+}
 
-// Explicitly assign named exports so Node.js CJS-ESM bridge can statically analyze them
-module.exports.JsGp2FServer = nativeAddon.JsGp2FServer
-module.exports.JsWorkflow = nativeAddon.JsWorkflow
-module.exports.NodeKind = nativeAddon.NodeKind
-module.exports.JsServerConfig = nativeAddon.JsServerConfig
-module.exports.JsActivityConfig = nativeAddon.JsActivityConfig
-module.exports.JsAstNode = nativeAddon.JsAstNode
+module.exports = { ...native, p, PolicyBuilder, FieldBuilder, VibeBuilder }

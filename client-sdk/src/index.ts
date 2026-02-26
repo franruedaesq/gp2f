@@ -24,6 +24,10 @@ export type { UndoButtonProps } from "./UndoButton";
 export { MergeModal } from "./MergeModal";
 export type { MergeModalProps } from "./MergeModal";
 
+// ── Policy Builder ────────────────────────────────────────────────────────────
+export { p, PolicyBuilder, FieldBuilder, VibeBuilder } from "./policy-builder";
+export type { AstNode, Builder } from "./policy-builder";
+
 // ── Lazy Policy Engine ────────────────────────────────────────────────────────
 
 /**
