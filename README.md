@@ -21,7 +21,7 @@ GP2F is a **deterministic, local-first framework** that decouples business rules
 8. [TypeScript Client SDK](#typescript-client-sdk)
 9. [Node.js Native Bindings](#nodejs-native-bindings)
 10. [Policy AST Reference](#policy-ast-reference)
-11. [Configuration](#configuration)
+11. [Deployment](#deployment)
 12. [Repository Structure](#repository-structure)
 
 ---
@@ -88,29 +88,33 @@ Embed an LLM co-pilot that proposes state changes via `POST /ai/propose`. The en
 ## Architecture
 
 ```
-┌─────────────────────────────────────────────────────────────┐
-│                        GP2F System                          │
-│                                                             │
-│  ┌──────────┐     ┌──────────────┐     ┌────────────────┐  │
-│  │  Client  │────▶│  WebSocket   │────▶│  Axum Server   │  │
-│  │ (WASM +  │◀────│   Channel    │◀────│ (Reconciler)   │  │
-│  │   TS)    │     └──────────────┘     └───────┬────────┘  │
-│  └──────────┘                                  │            │
-│                                     ┌──────────▼──────────┐ │
-│                                     │  Event Store        │ │
-│                                     │  (Append-only log)  │ │
-│                                     └─────────────────────┘ │
-└─────────────────────────────────────────────────────────────┘
+┌─────────────────────────────────────────────────────────────────────┐
+│                           GP2F System                               │
+│                                                                     │
+│  ┌──────────┐     ┌──────────────┐     ┌────────────────────────┐  │
+│  │  Client  │────▶│  WebSocket   │────▶│    Axum Server         │  │
+│  │ (WASM +  │◀────│   Channel    │◀────│  (gp2f-actor/server)   │  │
+│  │   TS)    │     └──────────────┘     └──────────┬─────────────┘  │
+│  └──────────┘                                     │                 │
+│                          ┌────────────────────────┤                 │
+│                          │                        │                 │
+│               ┌──────────▼──────┐    ┌────────────▼────────────┐   │
+│               │  gp2f-crdt      │    │  gp2f-store             │   │
+│               │  (Reconciler)   │    │  (Event Store)          │   │
+│               └─────────────────┘    └─────────────────────────┘   │
+└─────────────────────────────────────────────────────────────────────┘
 ```
 
 **Reconciliation flow:**
 
 ```
-Client predicts locally (WASM)
+Client predicts locally (WASM / gp2f-runtime)
   → emits signed op_id
-    → server validates signature, replay protection, snapshot hash, RBAC
-      → ACCEPT: broadcasts new state hash to all WebSocket clients
-      → REJECT: returns 3-way patch so the client can reconcile
+    → server validates signature (gp2f-security), replay protection, snapshot hash, RBAC
+      → gp2f-actor serialises ops per workflow instance
+        → gp2f-crdt reconciles state, applies CRDT/LWW/Transactional strategies
+          → ACCEPT: gp2f-broadcast fans out new state hash to all WebSocket clients
+          → REJECT: returns 3-way patch so the client can reconcile
 ```
 
 ---
@@ -218,34 +222,43 @@ The replay command reconstructs the authoritative state by applying accepted ops
 
 | Method | Path | Description |
 |--------|------|-------------|
-| `GET` | `/health` | Health check |
+| `GET` | `/health` | Readiness probe – checks that the backing store is reachable |
+| `GET` | `/livez` | Liveness probe – returns 200 as long as the process is running |
 | `GET` | `/ws` | WebSocket upgrade |
-| `POST` | `/op` | Submit an operation (same as WebSocket) |
+| `POST` | `/op` | Submit an operation synchronously (same as WebSocket) |
+| `POST` | `/op/async` | Low-latency async ingestion – acknowledges immediately (<1 ms) and pushes the result via WebSocket |
 | `POST` | `/token/mint` | Mint a short-lived AI agent token |
 | `POST` | `/token/redeem` | Redeem a token for an op |
 | `POST` | `/ai/propose` | Submit an AI-generated op proposal |
+| `POST` | `/ai/feedback` | Record a dismissed AI suggestion for model drift detection |
+| `POST` | `/agent/propose` | Submit an op proposal from an autonomous agent |
 
 ### Environment Variables
 
 | Variable | Default | Description |
 |----------|---------|-------------|
 | `RUST_LOG` | `info` | Log level (`trace`, `debug`, `info`, `warn`, `error`) |
-| `GP2F_TENANT_SECRET` | *(none)* | HMAC secret for signature validation (required in production) |
-| `GP2F_BIND_ADDR` | `0.0.0.0:3000` | Server listen address |
-| `GP2F_MAX_QUEUED_OPS` | `500` | Default per-tenant max queued ops |
-| `GP2F_MAX_WS_CONNS` | `100` | Default per-tenant max WebSocket connections |
+| `LOG_FORMAT` | *(unset)* | Set to `json` for structured JSON logging (recommended in production) |
+| `APP_ENV` | *(unset)* | Set to `production` to enforce production guards (requires `REDIS_URL` and signing keys) |
+| `DATABASE_URL` | *(none)* | PostgreSQL connection string. When set, uses Postgres as the event store |
+| `TEMPORAL_ENDPOINT` | *(none)* | Temporal server address (e.g. `http://temporal:7233`). Used when `DATABASE_URL` is not set |
+| `TEMPORAL_NAMESPACE` | `gp2f-prod` | Temporal namespace to use |
+| `REDIS_URL` | *(none)* | Redis connection string. Required in production for distributed actor coordination and broadcast |
+| `KEYS_JSON` | *(none)* | JSON array of signing key objects for HMAC/JWT validation |
+| `KEYS_POLL_INTERVAL_SECS` | `60` | How often (in seconds) to refresh signing keys from the key provider |
+| `INGESTION_QUEUE_SIZE` | `512` | Capacity of the async ingestion queue (`/op/async` endpoint) |
+| `POLICY_WASM_PATH` | `policy_wasm_bg.wasm` | Path to the compiled policy WASM module |
 
 ### Embedding the reconciler in your own Axum app
 
 ```rust
-use gp2f_server::reconciler::Reconciler;
+use gp2f_crdt::reconciler::Reconciler;
 
 // Development mode (no signature validation)
 let reconciler = Reconciler::new();
 
 // Production mode (HMAC validation)
-let secret = std::env::var("GP2F_TENANT_SECRET").unwrap();
-let reconciler = Reconciler::with_secret(secret.as_bytes());
+let reconciler = Reconciler::with_secret(b"your-hmac-secret");
 
 // Process an operation
 let response = reconciler.reconcile(&client_message);
@@ -504,6 +517,56 @@ Evaluates to `true` when the user's detected intent is `"frustrated"` **and** th
 
 ---
 
+## Deployment
+
+### Docker
+
+The repository ships two Dockerfiles:
+
+- `Dockerfile` – builds and runs the Axum reconciliation server.
+- `Dockerfile.worker` – builds and runs the background Temporal worker (used when `TEMPORAL_ENDPOINT` is set).
+
+```bash
+docker build -t gp2f/server .
+docker run -p 3000:3000 -e RUST_LOG=info gp2f/server
+```
+
+### Kubernetes (Helm)
+
+A production-ready Helm chart is included under `helm/gp2f/`.
+
+```bash
+# Install with default values
+helm install gp2f ./helm/gp2f
+
+# Override for production
+helm install gp2f ./helm/gp2f \
+  --set server.image.tag=1.0.0 \
+  --set server.autoscaling.enabled=true \
+  --set server.env.APP_ENV=production \
+  --set-string server.envFrom[0].secretRef.name=gp2f-secrets
+```
+
+Key chart features:
+
+- Horizontal Pod Autoscaler (min 3, max 10 replicas by default)
+- Separate worker Deployment for Temporal activity workers
+- Bundled `temporal-postgres.yaml` template for a minimal Temporal + Postgres stack in dev/staging
+
+See [`helm/gp2f/values.yaml`](helm/gp2f/values.yaml) for all configurable values.
+
+### Database migrations
+
+When using the Postgres event store, apply migrations in order:
+
+```bash
+psql $DATABASE_URL -f migrations/20240522_init.sql
+psql $DATABASE_URL -f migrations/20240523_auto_seq.sql
+psql $DATABASE_URL -f migrations/20240524_op_id_unique.sql
+```
+
+---
+
 ## Repository Structure
 
 ```
@@ -517,16 +580,23 @@ gp2f/
 │   │   └── version.rs  # VersionPolicy (allow-list for AST versions)
 │   └── tests/
 │       └── property_tests.rs  # proptest: random state × random AST
+├── gp2f-core/          # Shared wire types (ClientMessage, VibeVector, HLC timestamps)
+├── gp2f-security/      # RBAC, HMAC signature validation, replay protection, secrets
+├── gp2f-store/         # Append-only event store (in-memory, Postgres, Temporal backends)
+├── gp2f-broadcast/     # ACCEPT/REJECT broadcaster (tokio channels; Redis-ready)
+├── gp2f-token/         # Ephemeral AI agent token service with rate limiting
+├── gp2f-crdt/          # CRDT-based conflict-free state reconciler
+├── gp2f-actor/         # Per-instance actor model (serialises ops; Redis cluster coordination)
+├── gp2f-workflow/      # WorkflowDefinition + WorkflowInstance + built-in pilot workflows
+├── gp2f-vibe/          # Semantic Vibe classifier + LLM provider abstraction + LLM audit log
+├── gp2f-runtime/       # Wasmtime-based WASM engine for isomorphic policy evaluation
+├── gp2f-ingest/        # Async ingestion queue (< 1 ms HTTP ack; result via WebSocket push)
+├── gp2f-api/           # Shared HTTP handler utilities, middleware, and tool-gating
+├── gp2f-canary/        # Replay-based canary test suite for determinism regression detection
 ├── server/             # Axum HTTP + WebSocket reconciliation server
 │   └── src/
-│       ├── wire.rs           # ClientMessage / AcceptResponse / RejectResponse
-│       ├── reconciler.rs     # Stateful reconciler (append-only log)
-│       ├── rbac.rs           # Role-based access control
-│       ├── event_store.rs    # Append-only partitioned event log
-│       ├── replay_protection.rs # Bloom filter + exact-window replay guard
-│       ├── token_service.rs  # Ephemeral AI agent tokens
-│       ├── pilot_workflows.rs# Built-in workflow definitions
-│       └── workflow.rs       # WorkflowDefinition + WorkflowInstance
+│       ├── main.rs           # Routes, AppState, all HTTP/WS handlers
+│       └── lib.rs            # Re-exports for integration tests
 ├── gp2f-node/          # Native Node.js bindings (@gp2f/server) via napi-rs
 │   ├── src/
 │   │   ├── policy.rs   # evaluate / evaluateWithTrace bindings
@@ -535,7 +605,9 @@ gp2f/
 │   ├── index.d.ts      # TypeScript declarations (auto-generated)
 │   └── __test__/       # Jest contract + integration tests
 ├── cli/                # gp2f eval / replay CLI
-├── client-sdk/         # TypeScript npm package
+├── client-sdk/         # TypeScript npm package (@gp2f/client-sdk)
+├── migrations/         # PostgreSQL schema migrations (apply in order)
+├── helm/               # Helm chart for Kubernetes deployment
 └── docs/               # Architecture, wire protocol, SDK onboarding
 ```
 
