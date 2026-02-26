@@ -16,7 +16,9 @@ use gp2f_server::{
     async_ingestion::AsyncIngestionQueue,
     compat,
     llm_provider::{build_provider, LlmMessage, LlmProvider, LlmRequest},
-    middleware::{EnvVarKeyProvider, InMemoryPublicKeyStore, OpIdLayer, PollingKeyProvider, PublicKeyStore},
+    middleware::{
+        EnvVarKeyProvider, InMemoryPublicKeyStore, OpIdLayer, PollingKeyProvider, PublicKeyStore,
+    },
     rate_limit::{build_rate_limiter, DynRateLimiter},
     reconciler::Reconciler,
     redis_broadcast::{build_broadcaster, DynBroadcaster},
@@ -124,22 +126,26 @@ async fn main() {
     //   2. KEYS_JSON set               → EnvVarKeyProvider (static, one-shot load)
     //   3. Neither                     → empty InMemoryPublicKeyStore (dev/test only)
     const DEFAULT_KEYS_POLL_INTERVAL_SECS: u64 = 60;
-    let key_store: Arc<dyn PublicKeyStore> = if let Ok(interval_str) =
-        std::env::var("KEYS_POLL_INTERVAL_SECS")
-    {
-        let secs: u64 = interval_str.parse().unwrap_or(DEFAULT_KEYS_POLL_INTERVAL_SECS);
-        let interval = std::time::Duration::from_secs(secs);
-        tracing::info!(interval_secs = secs, "Loading public keys via PollingKeyProvider");
-        Arc::new(PollingKeyProvider::new(interval))
-    } else if std::env::var("KEYS_JSON").is_ok() {
-        tracing::info!("Loading public keys from KEYS_JSON");
-        Arc::new(EnvVarKeyProvider::from_env())
-    } else {
-        #[allow(deprecated)]
-        {
-            Arc::new(InMemoryPublicKeyStore::new())
-        }
-    };
+    let key_store: Arc<dyn PublicKeyStore> =
+        if let Ok(interval_str) = std::env::var("KEYS_POLL_INTERVAL_SECS") {
+            let secs: u64 = interval_str
+                .parse()
+                .unwrap_or(DEFAULT_KEYS_POLL_INTERVAL_SECS);
+            let interval = std::time::Duration::from_secs(secs);
+            tracing::info!(
+                interval_secs = secs,
+                "Loading public keys via PollingKeyProvider"
+            );
+            Arc::new(PollingKeyProvider::new(interval))
+        } else if std::env::var("KEYS_JSON").is_ok() {
+            tracing::info!("Loading public keys from KEYS_JSON");
+            Arc::new(EnvVarKeyProvider::from_env())
+        } else {
+            #[allow(deprecated)]
+            {
+                Arc::new(InMemoryPublicKeyStore::new())
+            }
+        };
     let op_id_layer = OpIdLayer::new(key_store);
 
     // ── LLM provider (OpenAI / Anthropic / Groq / Mock) ───────────────────
@@ -147,8 +153,8 @@ async fn main() {
 
     // ── Redis actor coordinator (multi-replica split-brain detection) ─────
     #[cfg(feature = "redis-broadcast")]
-    let actor_coordinator = gp2f_server::actor::RedisActorCoordinator::from_env()
-        .map(std::sync::Arc::new);
+    let actor_coordinator =
+        gp2f_server::actor::RedisActorCoordinator::from_env().map(std::sync::Arc::new);
 
     // ── Async ingestion queue (Phase 2.2 – low-latency /op/async endpoint) ─
     let ingestion_buffer: usize = std::env::var("INGESTION_QUEUE_SIZE")
@@ -476,10 +482,7 @@ fn guardrail_check(prompt: &str) -> Result<(), &'static str> {
     // code points (e.g. zero-width joiners used in homoglyph / hidden-text attacks).
     // sanitize_prompt_input already strips these characters; if a significant
     // fraction of the original input was invisible, treat it as suspicious.
-    let invisible_count = prompt
-        .chars()
-        .filter(|c| is_invisible_unicode(*c))
-        .count();
+    let invisible_count = prompt.chars().filter(|c| is_invisible_unicode(*c)).count();
     if invisible_count > MAX_INVISIBLE_UNICODE_CHARS {
         return Err("blocked by guardrail: excessive invisible characters");
     }
@@ -565,7 +568,11 @@ async fn agent_propose_handler(
     Json(req): Json<AgentProposeRequest>,
 ) -> impl IntoResponse {
     // 1. Rate-limit / budget check.
-    if let Err(e) = state.ai_rate_limiter.check_and_consume(&req.tenant_id).await {
+    if let Err(e) = state
+        .ai_rate_limiter
+        .check_and_consume(&req.tenant_id)
+        .await
+    {
         tracing::warn!(
             tenant_id = %req.tenant_id,
             error = %e,
