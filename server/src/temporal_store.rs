@@ -225,28 +225,38 @@ impl TemporalStore {
         {
             // Production path: connect to the Temporal frontend service.
             // Requires temporal-client crate (see module docs for setup).
-            // Replace this todo! with the real SDK call shown in the doc above.
-            tracing::info!(
-                endpoint = %self.endpoint,
-                namespace = %self.namespace,
-                "Connecting to Temporal cluster (temporal-production feature enabled)"
-            );
+            //
+            // To enable, add to server/Cargo.toml:
+            //   temporal-client = { git = "https://github.com/temporalio/sdk-rust", optional = true }
+            // and update: temporal-production = ["dep:temporal-client"]
+            // then uncomment the block below.
+            //
             // TODO(temporal-production): uncomment once temporal-client is added:
             // let opts = temporal_client::ClientOptions::default()
             //     .target_url(url::Url::parse(&self.endpoint)
             //         .map_err(|e| TemporalError::Connection(e.to_string()))?)
             //     .client_name("gp2f-server")
+            //     .client_version(env!("CARGO_PKG_VERSION"))
             //     .namespace(self.namespace.clone());
             // opts.connect().await
             //     .map_err(|e| TemporalError::Connection(e.to_string()))?;
+            return Err(TemporalError::Connection(
+                "temporal-production feature is enabled but the temporal-client SDK is not yet \
+                 integrated; add the temporal-client crate dependency and uncomment the \
+                 connection code in temporal_store.rs"
+                    .into(),
+            ));
         }
-        *self.connected.lock().await = true;
-        tracing::info!(
-            endpoint = %self.endpoint,
-            namespace = %self.namespace,
-            retention_days = self.retention_days,
-            "Temporal client connected"
-        );
+        #[cfg(not(feature = "temporal-production"))]
+        {
+            *self.connected.lock().await = true;
+            tracing::info!(
+                endpoint = %self.endpoint,
+                namespace = %self.namespace,
+                retention_days = self.retention_days,
+                "TemporalStore running in fallback (in-memory) mode"
+            );
+        }
         Ok(())
     }
 
