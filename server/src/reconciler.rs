@@ -69,7 +69,7 @@ impl Reconciler {
             broadcaster: Broadcaster::new(),
             tenant_secret: secret.to_vec(),
             limits: Arc::new(LimitsGuard::new()),
-            rbac: Arc::new(RbacRegistry::with_defaults()),
+            rbac: Arc::new(RbacRegistry::from_env()),
         }
     }
 
@@ -80,6 +80,17 @@ impl Reconciler {
 
     /// Process a [`ClientMessage`] and return a [`ServerMessage`].
     pub fn reconcile(&self, msg: &ClientMessage) -> ServerMessage {
+        // 0. Input validation: enforce length limits on all string fields to
+        //    prevent memory exhaustion attacks before any further processing.
+        if let Err(reason) = msg.validate() {
+            return ServerMessage::Reject(RejectResponse {
+                op_id: msg.op_id.clone(),
+                reason,
+                patch: empty_patch(),
+                retry_after_ms: None,
+            });
+        }
+
         // 1. Signature validation
         if let Err(reason) = verify_signature(msg, &self.tenant_secret) {
             return ServerMessage::Reject(RejectResponse {
@@ -799,5 +810,26 @@ mod tests {
             matches!(resp, ServerMessage::Reject(_)),
             "duplicate op_id from before recovery must be rejected"
         );
+    }
+
+    /// Oversized string fields in ClientMessage must be rejected before any
+    /// further processing (prevents memory exhaustion attacks).
+    #[test]
+    fn oversized_field_is_rejected_by_reconciler() {
+        use crate::wire::MAX_ID_LEN;
+        let r = Reconciler::new();
+        let hash = hash_state(&r.current_state());
+        let mut msg = make_msg("op-big", &hash);
+        msg.tenant_id = "t".repeat(MAX_ID_LEN + 1);
+        let resp = r.reconcile(&msg);
+        match resp {
+            ServerMessage::Reject(rej) => {
+                assert!(
+                    rej.reason.contains("tenant_id"),
+                    "rejection reason should mention tenant_id"
+                );
+            }
+            _ => panic!("expected Reject for oversized tenant_id"),
+        }
     }
 }

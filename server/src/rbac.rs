@@ -98,6 +98,43 @@ impl RbacRegistry {
         r
     }
 
+    /// Create a registry loaded from the `RBAC_CONFIG_JSON` environment variable.
+    ///
+    /// The variable must contain a JSON object whose keys are role names and
+    /// whose values are arrays of permission strings.  Example:
+    ///
+    /// ```json
+    /// {
+    ///   "admin": ["workflow:start", "workflow:signal", "workflow:cancel"],
+    ///   "reviewer": ["workflow:signal", "activity:execute"]
+    /// }
+    /// ```
+    ///
+    /// Falls back to [`Self::with_defaults()`] when the variable is absent or
+    /// cannot be parsed, emitting a warning so operators notice the misconfiguration.
+    pub fn from_env() -> Self {
+        if let Ok(raw) = std::env::var("RBAC_CONFIG_JSON") {
+            match serde_json::from_str::<std::collections::HashMap<String, Vec<String>>>(&raw) {
+                Ok(map) => {
+                    let mut registry = Self::default();
+                    for (role, perms) in &map {
+                        let refs: Vec<&str> = perms.iter().map(String::as_str).collect();
+                        registry.define(role, &refs);
+                    }
+                    tracing::info!(roles = map.len(), "RBAC registry loaded from RBAC_CONFIG_JSON");
+                    return registry;
+                }
+                Err(e) => {
+                    tracing::warn!(
+                        error = %e,
+                        "RBAC_CONFIG_JSON parse error; falling back to built-in defaults"
+                    );
+                }
+            }
+        }
+        Self::with_defaults()
+    }
+
     /// Register (or overwrite) the permissions for a role.
     pub fn define(&mut self, role: &str, permissions: &[&str]) {
         self.roles.insert(
@@ -228,5 +265,46 @@ mod tests {
             call_name: None,
         };
         assert!(!evaluate_rbac_guard(&ctx, &policy));
+    }
+
+    /// Shared mutex to serialize env-var–touching tests and prevent races when
+    /// Rust runs unit tests in parallel within the same process.
+    static ENV_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
+
+    #[test]
+    fn from_env_falls_back_to_defaults_when_var_unset() {
+        let _guard = ENV_LOCK.lock().unwrap();
+        std::env::remove_var("RBAC_CONFIG_JSON");
+        let reg = RbacRegistry::from_env();
+        let ctx = reg.build_context("t1", "admin");
+        assert!(ctx.has_permission("workflow:start"));
+    }
+
+    #[test]
+    fn from_env_loads_custom_roles_from_env_var() {
+        let _guard = ENV_LOCK.lock().unwrap();
+        let json = r#"{"ops": ["deploy:run", "deploy:rollback"], "reader": ["deploy:view"]}"#;
+        std::env::set_var("RBAC_CONFIG_JSON", json);
+        let reg = RbacRegistry::from_env();
+        std::env::remove_var("RBAC_CONFIG_JSON");
+
+        let ctx = reg.build_context("t1", "ops");
+        assert!(ctx.has_permission("deploy:run"));
+        assert!(ctx.has_permission("deploy:rollback"));
+        assert!(!ctx.has_permission("deploy:view"));
+
+        let reader = reg.build_context("t1", "reader");
+        assert!(reader.has_permission("deploy:view"));
+        assert!(!reader.has_permission("deploy:run"));
+    }
+
+    #[test]
+    fn from_env_falls_back_to_defaults_on_invalid_json() {
+        let _guard = ENV_LOCK.lock().unwrap();
+        std::env::set_var("RBAC_CONFIG_JSON", "not-valid-json");
+        let reg = RbacRegistry::from_env();
+        std::env::remove_var("RBAC_CONFIG_JSON");
+        let ctx = reg.build_context("t1", "admin");
+        assert!(ctx.has_permission("workflow:start"));
     }
 }
