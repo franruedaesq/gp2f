@@ -1,4 +1,5 @@
 pub mod actor;
+pub mod hlc;
 pub mod async_ingestion;
 pub mod broadcast;
 pub mod canary;

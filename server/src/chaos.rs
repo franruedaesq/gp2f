@@ -272,6 +272,7 @@ impl LoadSimulator {
         match result {
             crate::wire::ServerMessage::Accept(_) => m.accepted_ops += 1,
             crate::wire::ServerMessage::Reject(_) => m.rejected_ops += 1,
+            crate::wire::ServerMessage::Hello(_) => {} // hello is not a reconciliation result
         }
     }
 }

@@ -2,7 +2,7 @@ use clap::{Parser, Subcommand};
 use policy_core::{AstNode, Evaluator, VersionPolicy};
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
-use std::{fs, path::PathBuf, process};
+use std::{fs, path::PathBuf, process, time::{SystemTime, UNIX_EPOCH}};
 
 #[derive(Parser)]
 #[command(
@@ -57,6 +57,46 @@ enum Commands {
         #[arg(long)]
         op_id: Option<String>,
     },
+
+    /// Inject intentionally conflicting operations for testing (Spoofer).
+    ///
+    /// Generates a pair of [`ClientMessage`] JSON objects that target the
+    /// same field with different values from the same base snapshot hash.
+    /// Pipe the output into your test harness or WebSocket client to
+    /// reproduce concurrent-edit scenarios deterministically.
+    ///
+    /// Example:
+    ///   gp2f spoof --field amount --value-a 100 --value-b 200 --hash abc123
+    Spoof {
+        /// The JSON field name to conflict on (e.g. `amount`).
+        #[arg(long)]
+        field: String,
+
+        /// The value that client A proposes (JSON literal, e.g. `100`).
+        #[arg(long)]
+        value_a: String,
+
+        /// The value that client B proposes (JSON literal, e.g. `200`).
+        #[arg(long)]
+        value_b: String,
+
+        /// The base snapshot hash both clients believe the server is at.
+        /// Defaults to the hash of an empty object when omitted.
+        #[arg(long, default_value = "")]
+        hash: String,
+
+        /// Tenant identifier to embed in the messages.
+        #[arg(long, default_value = "spoof-tenant")]
+        tenant_id: String,
+
+        /// Workflow identifier to embed in the messages.
+        #[arg(long, default_value = "spoof-wf")]
+        workflow_id: String,
+
+        /// Instance identifier to embed in the messages.
+        #[arg(long, default_value = "spoof-inst")]
+        instance_id: String,
+    },
 }
 
 // ── replay event format ───────────────────────────────────────────────────────
@@ -104,6 +144,24 @@ fn main() {
             policy,
             op_id,
         } => cmd_replay(events, policy, op_id),
+
+        Commands::Spoof {
+            field,
+            value_a,
+            value_b,
+            hash,
+            tenant_id,
+            workflow_id,
+            instance_id,
+        } => cmd_spoof(
+            field,
+            value_a,
+            value_b,
+            hash,
+            tenant_id,
+            workflow_id,
+            instance_id,
+        ),
     }
 }
 
@@ -273,4 +331,80 @@ fn read_file(path: &PathBuf) -> String {
         eprintln!("error: cannot read '{}': {e}", path.display());
         process::exit(1);
     })
+}
+
+// ── spoof command ─────────────────────────────────────────────────────────────
+
+/// A minimal `ClientMessage`-shaped struct for the spoofer output.
+///
+/// Mirrors the wire format used by the server so the output can be fed
+/// directly into a WebSocket test harness without modification.
+#[derive(Serialize)]
+#[serde(rename_all = "camelCase")]
+struct SpoofMessage {
+    op_id: String,
+    ast_version: String,
+    action: String,
+    payload: Value,
+    client_snapshot_hash: String,
+    tenant_id: String,
+    workflow_id: String,
+    instance_id: String,
+}
+
+#[allow(clippy::too_many_arguments)]
+fn cmd_spoof(
+    field: String,
+    value_a: String,
+    value_b: String,
+    hash: String,
+    tenant_id: String,
+    workflow_id: String,
+    instance_id: String,
+) {
+    // Parse the JSON values; fall back to JSON strings if the input is not
+    // valid JSON (so bare words like `hello` are treated as string literals).
+    let parse_val = |raw: &str| -> Value {
+        serde_json::from_str(raw).unwrap_or_else(|_| Value::String(raw.to_owned()))
+    };
+
+    let val_a = parse_val(&value_a);
+    let val_b = parse_val(&value_b);
+
+    // Use epoch-millis as a simple unique prefix for op_ids.
+    let epoch_ms = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .map(|d| d.as_millis())
+        .unwrap_or(0);
+
+    let msg_a = SpoofMessage {
+        op_id: format!("spoof-{epoch_ms}-a"),
+        ast_version: "1.0.0".into(),
+        action: "update".into(),
+        payload: serde_json::json!({ &field: val_a }),
+        client_snapshot_hash: hash.clone(),
+        tenant_id: tenant_id.clone(),
+        workflow_id: workflow_id.clone(),
+        instance_id: instance_id.clone(),
+    };
+
+    let msg_b = SpoofMessage {
+        op_id: format!("spoof-{epoch_ms}-b"),
+        ast_version: "1.0.0".into(),
+        action: "update".into(),
+        payload: serde_json::json!({ &field: val_b }),
+        client_snapshot_hash: hash,
+        tenant_id,
+        workflow_id,
+        instance_id,
+    };
+
+    let output = serde_json::json!([msg_a, msg_b]);
+    match serde_json::to_string_pretty(&output) {
+        Ok(s) => println!("{s}"),
+        Err(e) => {
+            eprintln!("error: failed to serialize spoof messages: {e}");
+            process::exit(1);
+        }
+    }
 }

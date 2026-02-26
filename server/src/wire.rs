@@ -66,6 +66,11 @@ pub struct RejectResponse {
     pub op_id: String,
     pub reason: String,
     pub patch: ThreeWayPatch,
+    /// Suggested back-off interval in milliseconds (Retry-After semantics).
+    /// Present when the rejection is caused by server-side backpressure; the
+    /// client SHOULD pause sending new ops for at least this duration.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub retry_after_ms: Option<u32>,
 }
 
 /// 3-way patch used for conflict resolution.
@@ -96,12 +101,25 @@ pub enum FieldConflictStrategy {
     Transactional,
 }
 
+/// Server hello – sent once per connection immediately after the WebSocket
+/// handshake to provide the client with time-synchronisation data.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct HelloMessage {
+    /// Server wall-clock time in milliseconds since the Unix epoch.
+    pub server_time_ms: u64,
+    /// Server HLC timestamp at the moment of the hello.
+    pub server_hlc_ts: u64,
+}
+
 /// Top-level server message (either accept or reject).
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(tag = "type", rename_all = "SCREAMING_SNAKE_CASE")]
 pub enum ServerMessage {
     Accept(AcceptResponse),
     Reject(RejectResponse),
+    /// Sent once per connection immediately after the WebSocket handshake.
+    Hello(HelloMessage),
 }
 
 /// Request body for `POST /agent/propose`.

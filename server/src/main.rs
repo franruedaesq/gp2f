@@ -22,7 +22,7 @@ use gp2f_server::{
     token_service::{MintRequest, RedeemRequest, TokenService},
     tool_gating::ToolGatingService,
     wasm_engine::WasmtimeEngine,
-    wire::{AgentProposeRequest, ClientMessage, ServerMessage},
+    wire::{AgentProposeRequest, ClientMessage, HelloMessage, ServerMessage},
 };
 use policy_core::evaluator::hash_state;
 
@@ -158,6 +158,15 @@ async fn handle_socket(mut socket: WebSocket, state: AppState) {
     // receive server-initiated push messages.
     let mut broadcast_rx = state.broadcaster.subscribe("__global__");
 
+    // Send a HELLO message immediately so the client can synchronise its clock.
+    let hello = ServerMessage::Hello(HelloMessage {
+        server_time_ms: chrono::Utc::now().timestamp_millis() as u64,
+        server_hlc_ts: state.reconciler.event_store.hlc_now(),
+    });
+    if let Ok(hello_json) = serde_json::to_string(&hello) {
+        let _ = socket.send(Message::Text(hello_json)).await;
+    }
+
     loop {
         tokio::select! {
             // Incoming message from the WebSocket client
@@ -289,6 +298,7 @@ async fn ai_propose_handler(
             // the LLM cannot use error codes to probe the policy engine.
             tracing::info!(op_id = %r.op_id, reason = %r.reason, "AI proposal rejected (dropped)");
         }
+        ServerMessage::Hello(_) => {}
     }
     (StatusCode::OK, Json(response))
 }
@@ -471,6 +481,7 @@ async fn agent_propose_handler(
                 "AI agent proposal_rejected (dropped)"
             );
         }
+        ServerMessage::Hello(_) => {}
     }
 
     (

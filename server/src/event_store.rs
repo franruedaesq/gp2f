@@ -19,10 +19,14 @@ use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 
+use crate::hlc::{Hlc, HlcTimestamp};
 use crate::wire::ClientMessage;
 
 /// Compact a partition once it exceeds this many events.
-pub const COMPACTION_THRESHOLD: usize = 1_000;
+///
+/// Set to 100 so that in-memory state is kept small and snapshots are
+/// generated frequently, limiting the amount of work a replayer must do.
+pub const COMPACTION_THRESHOLD: usize = 100;
 
 /// The outcome of processing an op – stored alongside the original message.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
@@ -40,6 +44,8 @@ pub struct StoredEvent {
     pub seq: u64,
     /// Server wall-clock time of ingestion.
     pub ingested_at: DateTime<Utc>,
+    /// HLC timestamp assigned at ingestion time for causal ordering.
+    pub hlc_ts: HlcTimestamp,
     /// The original client operation.
     pub message: ClientMessage,
     /// Whether the op was accepted or rejected.
@@ -53,12 +59,15 @@ pub struct StoredEvent {
 pub struct EventStore {
     /// Map from `"tenant:workflow:instance"` → ordered list of events.
     logs: Mutex<HashMap<String, Vec<StoredEvent>>>,
+    /// HLC for monotonic, causally-ordered timestamps on every stored event.
+    hlc: Hlc,
 }
 
 impl EventStore {
     pub fn new() -> Self {
         Self {
             logs: Mutex::new(HashMap::new()),
+            hlc: Hlc::new(),
         }
     }
 
@@ -75,12 +84,14 @@ impl EventStore {
     /// [`COMPACTION_THRESHOLD`].
     pub fn append(&self, msg: ClientMessage, outcome: OpOutcome) -> u64 {
         let key = Self::partition_key(&msg);
+        let hlc_ts = self.hlc.now();
         let mut logs = self.logs.lock().unwrap();
         let partition = logs.entry(key.clone()).or_default();
         let seq = partition.len() as u64;
         partition.push(StoredEvent {
             seq,
             ingested_at: Utc::now(),
+            hlc_ts,
             message: msg,
             outcome,
         });
@@ -106,6 +117,11 @@ impl EventStore {
     /// Total number of events across all partitions.
     pub fn total_count(&self) -> usize {
         self.logs.lock().unwrap().values().map(Vec::len).sum()
+    }
+
+    /// Return the current HLC timestamp without appending an event.
+    pub fn hlc_now(&self) -> HlcTimestamp {
+        self.hlc.now()
     }
 }
 
@@ -153,6 +169,7 @@ fn compact_partition(partition: &mut Vec<StoredEvent>) {
     let snapshot = StoredEvent {
         seq: compacted_from_seq,
         ingested_at: Utc::now(),
+        hlc_ts: partition.last().map(|e| e.hlc_ts).unwrap_or(0),
         message: ClientMessage {
             op_id: format!("compacted:{compacted_from_seq}..{last_seq}"),
             payload: Value::Object(merged),
@@ -235,6 +252,7 @@ mod tests {
             StoredEvent {
                 seq: 0,
                 ingested_at: Utc::now(),
+                hlc_ts: 0,
                 message: ClientMessage {
                     op_id: "op-0".into(),
                     payload: json!({"x": 1}),
@@ -245,6 +263,7 @@ mod tests {
             StoredEvent {
                 seq: 1,
                 ingested_at: Utc::now(),
+                hlc_ts: 1,
                 message: ClientMessage {
                     op_id: "op-1".into(),
                     payload: json!({"y": 2}),
@@ -269,6 +288,7 @@ mod tests {
             StoredEvent {
                 seq: 0,
                 ingested_at: Utc::now(),
+                hlc_ts: 0,
                 message: ClientMessage {
                     op_id: "op-0".into(),
                     payload: json!({"x": 1}),
@@ -279,6 +299,7 @@ mod tests {
             StoredEvent {
                 seq: 1,
                 ingested_at: Utc::now(),
+                hlc_ts: 1,
                 message: ClientMessage {
                     op_id: "op-1".into(),
                     payload: json!({"x": 99}),
