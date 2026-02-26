@@ -83,7 +83,7 @@ impl FailureWindow {
         // Use checked_sub to prevent panic if uptime < FAILURE_WINDOW
         let cutoff = Instant::now()
             .checked_sub(FAILURE_WINDOW)
-            .unwrap_or_else(|| Instant::now());
+            .unwrap_or_else(Instant::now);
         self.samples.retain(|s| s.ts >= cutoff);
         if self.samples.is_empty() {
             return None;
