@@ -35,6 +35,7 @@ server:
 
   env:
     RUST_LOG: "info"
+    LOG_FORMAT: "json"
     # Set via a Secret in production:
     # OPENAI_API_KEY, ANTHROPIC_API_KEY, GROQ_API_KEY
     # TEMPORAL_ENDPOINT, TEMPORAL_NAMESPACE
@@ -93,6 +94,7 @@ worker:
 
   env:
     RUST_LOG: "info"
+    LOG_FORMAT: "json"
     TEMPORAL_NAMESPACE: "gp2f-prod"
 
   envFrom: []

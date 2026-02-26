@@ -80,6 +80,7 @@ mod tests {
             client_signature: sig,
             role: "default".into(),
             vibe: None,
+            trace_id: None,
         }
     }
 

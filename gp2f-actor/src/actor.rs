@@ -44,6 +44,7 @@ use std::{
 };
 
 use tokio::sync::{broadcast, mpsc, oneshot};
+use tracing::Instrument as _;
 
 use crate::{
     event_store::OpOutcome,
@@ -161,20 +162,49 @@ impl WorkflowActor {
         while let Some(msg) = self.rx.recv().await {
             match msg {
                 ActorMessage::Reconcile { msg, reply_tx } => {
-                    let response = self.reconciler.reconcile(&msg);
-                    // Persist to the durable store so state survives restarts.
+                    // Create a tracing span carrying trace_id so that all log
+                    // events emitted by the Reconciler and Persistence layers
+                    // are correlated under the same trace.  Falls back to op_id
+                    // when the client does not supply an explicit trace_id.
+                    let trace_id = msg
+                        .trace_id
+                        .as_deref()
+                        .unwrap_or(msg.op_id.as_str())
+                        .to_owned();
+                    let span = tracing::info_span!(
+                        "actor.reconcile",
+                        trace_id = %trace_id,
+                        op_id = %msg.op_id,
+                        tenant_id = %msg.tenant_id,
+                        workflow_id = %msg.workflow_id,
+                        instance_id = %msg.instance_id,
+                    );
+                    // Run the synchronous reconciler call within the span scope.
+                    let response = span.in_scope(|| self.reconciler.reconcile(&msg));
                     let outcome = match &response {
                         ServerMessage::Accept(_) => OpOutcome::Accepted,
                         _ => OpOutcome::Rejected,
                     };
-                    match self.persistent_store.append((*msg).clone(), outcome).await {
-                        Ok(seq) => {
-                            tracing::debug!(op_id = %msg.op_id, seq, "op persisted to durable store");
-                        }
-                        Err(e) => {
-                            tracing::error!(op_id = %msg.op_id, error = %e, "failed to persist op to durable store");
+                    // Run the async persistence call instrumented with the span so
+                    // that storage-layer log events inherit the trace_id.  The debug/
+                    // error events are emitted inside the instrumented future so that
+                    // `span` can be moved rather than cloned.
+                    async {
+                        match self
+                            .persistent_store
+                            .append((*msg).clone(), outcome)
+                            .await
+                        {
+                            Ok(seq) => {
+                                tracing::debug!(op_id = %msg.op_id, seq, "op persisted to durable store");
+                            }
+                            Err(e) => {
+                                tracing::error!(op_id = %msg.op_id, error = %e, "failed to persist op to durable store");
+                            }
                         }
                     }
+                    .instrument(span)
+                    .await;
                     // Broadcast to subscribed WebSocket clients (ignore errors
                     // when there are no subscribers).
                     let _ = self.broadcast_tx.send(response.clone());
@@ -543,6 +573,7 @@ mod tests {
             client_signature: None,
             role: "default".into(),
             vibe: None,
+            trace_id: None,
         }
     }
 
@@ -617,6 +648,7 @@ mod tests {
             client_signature: None,
             role: "default".into(),
             vibe: None,
+            trace_id: None,
         };
 
         // Step 1: populate the store with one accepted op via a "first" actor.
@@ -681,6 +713,7 @@ mod tests {
             client_signature: None,
             role: "default".into(),
             vibe: None,
+            trace_id: None,
         };
 
         let store = Arc::new(InMemoryStore::new());

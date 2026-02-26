@@ -122,6 +122,7 @@ mod tests {
             client_signature: None,
             role: "user".into(),
             vibe: None,
+            trace_id: None,
         }
     }
 
