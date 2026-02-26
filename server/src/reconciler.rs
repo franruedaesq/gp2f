@@ -173,7 +173,13 @@ impl Reconciler {
         let instance_key = EventStore::partition_key(msg);
         let new_state = {
             let mut crdt_docs = self.crdt_docs.lock().unwrap();
-            apply_op_with_crdt(&current_state, &msg.payload, &self.schema, &mut crdt_docs, &instance_key)
+            apply_op_with_crdt(
+                &current_state,
+                &msg.payload,
+                &self.schema,
+                &mut crdt_docs,
+                &instance_key,
+            )
         };
         let new_hash = hash_state(&new_state);
 
@@ -245,11 +251,8 @@ pub fn three_way_merge(
 ) -> ThreeWayPatch {
     let mut conflicts = Vec::new();
 
-    if let (
-        Value::Object(base_obj),
-        Value::Object(server_obj),
-        Value::Object(client_obj),
-    ) = (base, server, client)
+    if let (Value::Object(base_obj), Value::Object(server_obj), Value::Object(client_obj)) =
+        (base, server, client)
     {
         for (key, client_val) in client_obj {
             let path = format!("/{key}");
@@ -264,11 +267,8 @@ pub fn three_way_merge(
 
             // A true conflict: both sides diverged from base on the same field.
             if client_changed && server_changed {
-                let resolved = resolve_field(
-                    server_val.unwrap_or(&Value::Null),
-                    client_val,
-                    strategy,
-                );
+                let resolved =
+                    resolve_field(server_val.unwrap_or(&Value::Null), client_val, strategy);
                 conflicts.push(FieldConflict {
                     path,
                     strategy: strategy.into(),

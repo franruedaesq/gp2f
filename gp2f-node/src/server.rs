@@ -102,14 +102,13 @@ async fn run_handler(
         );
     };
 
-    let result = policy_core::Evaluator::new()
-        .evaluate(&req.state, &entry.policy);
+    let result = policy_core::Evaluator::new().evaluate(&req.state, &entry.policy);
 
     match result {
         Ok(eval) => {
             if eval.result {
-                let state_json = serde_json::to_string(&req.state)
-                    .unwrap_or_else(|_| "null".to_owned());
+                let state_json =
+                    serde_json::to_string(&req.state).unwrap_or_else(|_| "null".to_owned());
                 crate::workflow::invoke_on_execute(
                     entry,
                     crate::workflow::JsExecutionContext {
