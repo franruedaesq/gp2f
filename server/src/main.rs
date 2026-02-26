@@ -34,9 +34,6 @@ struct AppState {
     actor_registry: Arc<ActorRegistry>,
     /// Broadcaster (Redis PubSub or in-process fallback).
     broadcaster: DynBroadcaster,
-    /// Persistent event store (Temporal in production, in-memory for dev).
-    #[allow(dead_code)]
-    event_store: Arc<dyn PersistentStore>,
     /// LLM provider (OpenAI / Anthropic / Groq / Mock).
     llm_provider: Arc<dyn LlmProvider>,
     /// Tool gating service – decides which tools the LLM may see.
@@ -100,7 +97,7 @@ async fn main() {
     // Background worker: drains the async ingestion queue and runs full
     // reconcile + Temporal signal pipeline.
     let bg_reconciler = Arc::new(Reconciler::new());
-    let bg_actor_registry = Arc::new(ActorRegistry::new());
+    let bg_actor_registry = Arc::new(ActorRegistry::with_store(event_store.clone()));
     tokio::spawn(async move {
         while let Some(msg) = ingestion_rx.recv().await {
             let handle =
@@ -115,9 +112,8 @@ async fn main() {
     let state = AppState {
         reconciler: Arc::new(Reconciler::new()),
         token_service: Arc::new(TokenService::new()),
-        actor_registry: Arc::new(ActorRegistry::new()),
+        actor_registry: Arc::new(ActorRegistry::with_store(event_store.clone())),
         broadcaster,
-        event_store,
         llm_provider,
         tool_gating: Arc::new(ToolGatingService::new()),
         ai_rate_limiter: Arc::new(AiRateLimiter::new()),
