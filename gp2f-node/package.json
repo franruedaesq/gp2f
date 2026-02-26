@@ -24,15 +24,14 @@
   ],
   "license": "MIT",
   "napi": {
-    "name": "gp2f-node",
-    "triples": {
-      "defaults": true,
-      "additional": [
-        "x86_64-unknown-linux-musl",
-        "aarch64-unknown-linux-gnu",
-        "aarch64-apple-darwin"
-      ]
-    }
+    "binaryName": "gp2f-node",
+    "targets": [
+      "x86_64-unknown-linux-gnu",
+      "x86_64-unknown-linux-musl",
+      "aarch64-unknown-linux-gnu",
+      "x86_64-apple-darwin",
+      "aarch64-apple-darwin"
+    ]
   },
   "devDependencies": {
     "@napi-rs/cli": "^3.5.1",
