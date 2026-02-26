@@ -194,9 +194,9 @@ impl PublicKeyStore for EnvVarKeyProvider {
 /// This is the shared loading logic used by both [`EnvVarKeyProvider`] and
 /// [`PollingKeyProvider`].
 fn load_keys_from_env() -> HashMap<String, VerifyingKey> {
-    let raw = match std::env::var("KEYS_JSON") {
-        Ok(v) => v,
-        Err(_) => return HashMap::new(),
+    let raw = match crate::secrets::resolve_secret("KEYS_JSON") {
+        Some(v) => v,
+        None => return HashMap::new(),
     };
     let map: HashMap<String, String> = match serde_json::from_str(&raw) {
         Ok(m) => m,

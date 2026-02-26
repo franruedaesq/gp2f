@@ -17,7 +17,7 @@
 
 // In no_std + alloc builds, bring heap types into scope.
 #[cfg(not(feature = "std"))]
-use alloc::string::String;
+extern crate alloc;
 
 /// Normalise an ISO-8601 / RFC-3339 datetime string to a Unix timestamp
 /// (seconds since the epoch, UTC).

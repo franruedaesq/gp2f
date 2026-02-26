@@ -406,7 +406,7 @@ impl RedisActorCoordinator {
     /// or falls back to a random hex string to guarantee uniqueness across
     /// pod restarts.
     pub fn from_env() -> Option<Self> {
-        let url = std::env::var("REDIS_URL").ok()?;
+        let url = crate::secrets::resolve_secret("REDIS_URL")?;
         let pod_id = std::env::var("HOSTNAME").unwrap_or_else(|_| {
             // Generate a random 8-byte hex suffix so that restarts don't collide.
             let nanos = std::time::SystemTime::now()
