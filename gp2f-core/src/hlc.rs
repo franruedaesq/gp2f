@@ -48,6 +48,9 @@ fn pack(wall_ms: u64, logical: u16) -> HlcTimestamp {
 /// for causal ordering across distributed nodes.
 pub struct Hlc {
     last: Mutex<HlcTimestamp>,
+    /// Optional fixed wall clock for deterministic testing.
+    #[cfg(test)]
+    mock_wall_ms: Option<u64>,
 }
 
 impl Hlc {
@@ -55,6 +58,17 @@ impl Hlc {
     pub const fn new() -> Self {
         Self {
             last: Mutex::new(0),
+            #[cfg(test)]
+            mock_wall_ms: None,
+        }
+    }
+
+    /// Create a new HLC with a fixed wall clock for testing.
+    #[cfg(test)]
+    pub fn with_mock_wall(ms: u64) -> Self {
+        Self {
+            last: Mutex::new(0),
+            mock_wall_ms: Some(ms),
         }
     }
 
@@ -65,7 +79,11 @@ impl Hlc {
     ///    returned timestamps from this instance.
     /// 2. The wall-clock component is always ≥ the current physical time.
     pub fn now(&self) -> HlcTimestamp {
+        #[cfg(not(test))]
         let wall_ms = Utc::now().timestamp_millis() as u64;
+        #[cfg(test)]
+        let wall_ms = self.mock_wall_ms.unwrap_or_else(|| Utc::now().timestamp_millis() as u64);
+
         let mut last = self.last.lock().unwrap();
         let last_wall = hlc_wall_ms(*last);
         let new_ts = if wall_ms > last_wall {
@@ -84,7 +102,11 @@ impl Hlc {
     /// Ensures the local clock is at least as large as `remote`, then
     /// increments to produce a new timestamp strictly greater than both.
     pub fn update_with_remote(&self, remote: HlcTimestamp) -> HlcTimestamp {
+        #[cfg(not(test))]
         let wall_ms = Utc::now().timestamp_millis() as u64;
+        #[cfg(test)]
+        let wall_ms = self.mock_wall_ms.unwrap_or_else(|| Utc::now().timestamp_millis() as u64);
+
         let mut last = self.last.lock().unwrap();
         let last_wall = hlc_wall_ms(*last);
         let remote_wall = hlc_wall_ms(remote);
@@ -131,16 +153,20 @@ mod tests {
 
     #[test]
     fn hlc_logical_increments_when_wall_is_same() {
-        let clock = Hlc::new();
-        // Force two consecutive ticks to get the same wall value by injecting
-        // a "wall in the past" via update_with_remote.
+        // Use a fixed wall clock to ensure deterministic behavior.
+        // Without this, the wall clock might advance between calls on slow runners.
+        let wall = 1_700_000_000_000;
+        let clock = Hlc::with_mock_wall(wall);
+
         let ts1 = clock.now();
-        // Simulate wall clock returning the same ms by using update_with_remote
-        // with the same wall component.
-        let same_wall = pack(hlc_wall_ms(ts1), 0);
-        let ts2 = clock.update_with_remote(same_wall);
+
+        // Even with update_with_remote using the same wall time,
+        // strict monotonicity demands the logical counter increments.
+        let same_wall_remote = pack(wall, 0);
+        let ts2 = clock.update_with_remote(same_wall_remote);
+
         assert!(ts2 > ts1);
-        assert_eq!(hlc_wall_ms(ts2), hlc_wall_ms(ts1));
+        assert_eq!(hlc_wall_ms(ts2), wall);
         assert!(hlc_logical(ts2) > hlc_logical(ts1));
     }
 

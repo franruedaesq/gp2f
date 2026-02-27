@@ -16,14 +16,6 @@
  * ```
  */
 
-// ── Internal helper ───────────────────────────────────────────────────────────
-
-function resolve(node) {
-  return node && typeof node.build === 'function' ? node.build() : node
-}
-
-// ── FieldBuilder ──────────────────────────────────────────────────────────────
-
 class FieldBuilder {
   constructor(path) {
     this._path = path
@@ -32,8 +24,10 @@ class FieldBuilder {
   _op(kind, value) {
     return {
       kind,
-      children: [{ kind: 'Field', path: this._path }],
-      value: String(value)
+      children: [
+        { kind: 'Field', path: this._path },
+        { kind: 'Literal', value: String(value) }
+      ]
     }
   }
 
@@ -57,16 +51,20 @@ class FieldBuilder {
   in(values) {
     return {
       kind: 'In',
-      children: [{ kind: 'Field', path: this._path }],
-      value: JSON.stringify(values)
+      children: [
+        { kind: 'Field', path: this._path },
+        { kind: 'Literal', value: JSON.stringify(values) }
+      ]
     }
   }
 
   contains(value) {
     return {
       kind: 'Contains',
-      children: [{ kind: 'Field', path: this._path }],
-      value: String(value)
+      children: [
+        { kind: 'Field', path: this._path },
+        { kind: 'Literal', value: String(value) }
+      ]
     }
   }
 
@@ -80,8 +78,6 @@ class FieldBuilder {
     return this.build()
   }
 }
-
-// ── VibeBuilder ───────────────────────────────────────────────────────────────
 
 class VibeBuilder {
   constructor(intent) {
@@ -107,7 +103,9 @@ class VibeBuilder {
   }
 }
 
-// ── PolicyBuilder ─────────────────────────────────────────────────────────────
+function resolve(node) {
+  return node && typeof node.build === 'function' ? node.build() : node
+}
 
 class PolicyBuilder {
   static field(path) {
