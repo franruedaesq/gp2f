@@ -769,8 +769,12 @@ mod tests {
 
     // ── EnvVarKeyProvider tests ───────────────────────────────────────────
 
+    // Shared mutex to serialize env-var–touching tests and prevent races.
+    static ENV_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
+
     #[test]
     fn env_var_key_provider_empty_when_no_env_var() {
+        let _guard = ENV_LOCK.lock().unwrap();
         // Ensure the env var is not set.
         std::env::remove_var("KEYS_JSON");
         let provider = EnvVarKeyProvider::from_env();
@@ -779,6 +783,7 @@ mod tests {
 
     #[test]
     fn env_var_key_provider_loads_valid_key() {
+        let _guard = ENV_LOCK.lock().unwrap();
         use ed25519_dalek::SigningKey;
         let signing_key = SigningKey::generate(&mut OsRng);
         let hex_key: String = signing_key
@@ -797,6 +802,7 @@ mod tests {
 
     #[test]
     fn env_var_key_provider_skips_invalid_hex() {
+        let _guard = ENV_LOCK.lock().unwrap();
         std::env::set_var("KEYS_JSON", r#"{"bad-client": "notvalidhex"}"#);
         let provider = EnvVarKeyProvider::from_env();
         assert!(provider.get("bad-client").is_none());
@@ -805,6 +811,7 @@ mod tests {
 
     #[test]
     fn env_var_key_provider_invalid_json_returns_empty() {
+        let _guard = ENV_LOCK.lock().unwrap();
         std::env::set_var("KEYS_JSON", "not-json");
         let provider = EnvVarKeyProvider::from_env();
         assert!(provider.get("any").is_none());
