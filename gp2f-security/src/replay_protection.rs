@@ -309,12 +309,25 @@ impl ReplayStore for RedisReplayGuard {
         let mut conn = match self.client.get_multiplexed_async_connection().await {
             Ok(c) => c,
             Err(e) => {
+                let is_production = std::env::var("APP_ENV")
+                    .map(|v| v.eq_ignore_ascii_case("production"))
+                    .unwrap_or(false);
+
+                if is_production {
+                    tracing::error!(
+                        client_id = %client_id,
+                        error = %e,
+                        "Redis replay guard connection error; denying op (fail-closed)"
+                    );
+                    return true; // fail closed: treat as duplicate/deny if Redis is unreachable
+                }
+
                 tracing::warn!(
                     client_id = %client_id,
                     error = %e,
                     "Redis replay guard connection error; allowing op (fail-open)"
                 );
-                return false; // fail open: allow op if Redis is unreachable
+                return false; // fail open: allow op if Redis is unreachable (dev/test)
             }
         };
 

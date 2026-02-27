@@ -449,14 +449,38 @@ impl PersistentStore for TemporalStore {
     }
 
     async fn events_for(&self, key: &str) -> Vec<StoredEvent> {
-        if *self.connected.lock().await {
-            // Production path: query Temporal history for this workflow ID.
-            // temporal_client.list_workflow_history(Self::workflow_id_for(key))
-            tracing::debug!(
-                workflow_id = %Self::workflow_id_for(key),
-                "events_for: Temporal history query (not yet implemented; using fallback)"
-            );
+        let is_production = std::env::var("APP_ENV")
+            .map(|v| v.eq_ignore_ascii_case("production"))
+            .unwrap_or(false);
+
+        // Fail closed in production or when the temporal-production feature is enabled.
+        // We cannot allow silent data loss via in-memory fallback.
+        if is_production || cfg!(feature = "temporal-production") {
+            if *self.connected.lock().await {
+                // CRITICAL SAFETY CHECK:
+                // In production, we cannot fall back to in-memory storage for history
+                // retrieval, as that would result in data loss (actor starting with
+                // empty state) after a restart.
+                //
+                // Since the Temporal history fetch is not yet implemented, we MUST
+                // panic or error loudly to prevent silent state corruption.
+                let msg = format!(
+                    "TemporalStore::events_for not implemented! Cannot recover state for {key}. \
+                     This is a critical gap in the production implementation."
+                );
+                tracing::error!(%msg);
+                panic!("{}", msg);
+            }
+        } else {
+            // Dev/Test mode: log a warning but allow fallback.
+            if *self.connected.lock().await {
+                tracing::debug!(
+                    workflow_id = %Self::workflow_id_for(key),
+                    "events_for: Temporal history query (not yet implemented; using fallback)"
+                );
+            }
         }
+
         self.fallback.events_for(key)
     }
 
