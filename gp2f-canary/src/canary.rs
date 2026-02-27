@@ -80,8 +80,13 @@ impl FailureWindow {
     /// Failure rate over the last [`FAILURE_WINDOW`].  Returns `None` when
     /// there are no samples in the window.
     fn failure_rate(&mut self) -> Option<f64> {
-        let cutoff = Instant::now() - FAILURE_WINDOW;
-        self.samples.retain(|s| s.ts >= cutoff);
+        // Use checked_sub to prevent panic if system uptime < FAILURE_WINDOW.
+        // If checked_sub returns None (underflow), the uptime is less than the window,
+        // so all samples are valid and we skip eviction.
+        if let Some(c) = Instant::now().checked_sub(FAILURE_WINDOW) {
+            self.samples.retain(|s| s.ts >= c);
+        }
+
         if self.samples.is_empty() {
             return None;
         }

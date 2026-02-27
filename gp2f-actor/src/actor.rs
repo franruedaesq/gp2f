@@ -351,7 +351,26 @@ impl ActorRegistry {
                     });
                 }
                 Err(e) => {
-                    // Redis unavailable – fail open (spawn locally) so a Redis outage
+                    // In production, we MUST fail closed to prevent split-brain.
+                    let is_production = std::env::var("APP_ENV")
+                        .map(|v| v.eq_ignore_ascii_case("production"))
+                        .unwrap_or(false);
+
+                    if is_production {
+                        tracing::error!(
+                            instance_key = %key,
+                            error = %e,
+                            "Redis actor lock unavailable; failing closed (production)"
+                        );
+                        // Using SplitBrainError with empty owner since we couldn't determine the owner.
+                        // This effectively acts as a 503 Service Unavailable signal.
+                        return Err(SplitBrainError {
+                            instance_key: key,
+                            owner_pod: "unknown (redis error)".to_string(),
+                        });
+                    }
+
+                    // Dev/Test: Redis unavailable – fail open (spawn locally) so a Redis outage
                     // does not take down the entire cluster.  Log a warning so operators
                     // are alerted.
                     tracing::warn!(
