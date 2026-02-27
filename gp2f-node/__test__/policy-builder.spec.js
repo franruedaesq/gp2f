@@ -27,8 +27,8 @@ describe('FieldBuilder – equality operators', () => {
       kind: 'Eq',
       children: [
         { kind: 'Field', path: '/role' },
-        { kind: 'Literal', value: 'admin' },
       ],
+      value: 'admin'
     })
   })
 
@@ -39,7 +39,7 @@ describe('FieldBuilder – equality operators', () => {
   test('neq produces a Neq node', () => {
     const node = p.field('/status').neq('banned')
     expect(node.kind).toBe('Neq')
-    expect(node.children[1].value).toBe('banned')
+    expect(node.value).toBe('banned')
   })
 
   test('notEqual is an alias for neq', () => {
@@ -51,7 +51,7 @@ describe('FieldBuilder – comparison operators', () => {
   test('gt produces a Gt node', () => {
     const node = p.field('/age').gt(18)
     expect(node.kind).toBe('Gt')
-    expect(node.children[1].value).toBe('18')
+    expect(node.value).toBe('18')
   })
 
   test('greaterThan is an alias for gt', () => {
@@ -88,13 +88,13 @@ describe('FieldBuilder – collection operators', () => {
     const node = p.field('/role').in(['admin', 'editor'])
     expect(node.kind).toBe('In')
     expect(node.children[0]).toEqual({ kind: 'Field', path: '/role' })
-    expect(node.children[1]).toEqual({ kind: 'Literal', value: '["admin","editor"]' })
+    expect(node.value).toBe('["admin","editor"]')
   })
 
   test('contains produces a Contains node', () => {
     const node = p.field('/tags').contains('urgent')
     expect(node.kind).toBe('Contains')
-    expect(node.children[1].value).toBe('urgent')
+    expect(node.value).toBe('urgent')
   })
 })
 
