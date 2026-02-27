@@ -32,47 +32,41 @@ class FieldBuilder {
   _op(kind, value) {
     return {
       kind,
-      children: [
-        { kind: 'Field', path: this._path },
-        { kind: 'Literal', value },
-      ],
+      children: [{ kind: 'Field', path: this._path }],
+      value: String(value)
     }
   }
 
   // Equality
-  equal(value) { return this._op('Eq', String(value)) }
+  equal(value) { return this._op('Eq', value) }
   eq(value) { return this.equal(value) }
-  notEqual(value) { return this._op('Neq', String(value)) }
+  notEqual(value) { return this._op('Neq', value) }
   neq(value) { return this.notEqual(value) }
 
   // Comparisons
-  greaterThan(value) { return this._op('Gt', String(value)) }
+  greaterThan(value) { return this._op('Gt', value) }
   gt(value) { return this.greaterThan(value) }
-  greaterThanOrEqual(value) { return this._op('Gte', String(value)) }
+  greaterThanOrEqual(value) { return this._op('Gte', value) }
   gte(value) { return this.greaterThanOrEqual(value) }
-  lessThan(value) { return this._op('Lt', String(value)) }
+  lessThan(value) { return this._op('Lt', value) }
   lt(value) { return this.lessThan(value) }
-  lessThanOrEqual(value) { return this._op('Lte', String(value)) }
+  lessThanOrEqual(value) { return this._op('Lte', value) }
   lte(value) { return this.lessThanOrEqual(value) }
 
   // Collection
   in(values) {
     return {
       kind: 'In',
-      children: [
-        { kind: 'Field', path: this._path },
-        { kind: 'Literal', value: JSON.stringify(values) },
-      ],
+      children: [{ kind: 'Field', path: this._path }],
+      value: JSON.stringify(values)
     }
   }
 
   contains(value) {
     return {
       kind: 'Contains',
-      children: [
-        { kind: 'Field', path: this._path },
-        { kind: 'Literal', value },
-      ],
+      children: [{ kind: 'Field', path: this._path }],
+      value: String(value)
     }
   }
 
