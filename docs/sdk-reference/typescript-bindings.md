@@ -1,6 +1,6 @@
 # TypeScript SDK Reference: Frontend Bindings
 
-This document describes the complete TypeScript API for the GP2F frontend SDK. The SDK is distributed as an ES module in the `client-sdk` package and provides typed wrappers around the WASM evaluator, the WebCrypto KMS integration, the `op_id` generation protocol, and the offline sync manager.
+This document describes the complete TypeScript API for the GP2F frontend SDK. The SDK is distributed as an ES module in the `client-sdk` package and provides typed wrappers around the WASM evaluator, the WebCrypto KMS integration, the `op_id` generation protocol, the offline sync manager, and the fluent policy builder.
 
 ---
 
@@ -9,6 +9,7 @@ This document describes the complete TypeScript API for the GP2F frontend SDK. T
 ```
 client-sdk/
 ├── src/
+│   ├── policy-builder.ts        # Fluent policy builder (PolicyBuilder / p)
 │   ├── wasm/
 │   │   └── init.ts              # WASM module initializer
 │   ├── crypto/
@@ -29,6 +30,35 @@ client-sdk/
     ├── policy_core.js
     └── policy_core.d.ts
 ```
+
+---
+
+## Module: `policy-builder`
+
+The `policy-builder` module exports the **Fluent Policy Builder** API for constructing policy ASTs without writing raw JSON. Import with:
+
+```typescript
+import { p, PolicyBuilder, FieldBuilder, VibeBuilder } from '@gp2f/client-sdk';
+```
+
+`p` is a shorthand alias for `PolicyBuilder`. All builder methods are static.
+
+### Quick example
+
+```typescript
+import { p } from '@gp2f/client-sdk';
+
+const policy = p.and(
+  p.or(
+    p.field('/user/role').eq('admin'),
+    p.field('/user/role').eq('editor'),
+  ),
+  p.exists('/session/token'),
+  p.not(p.field('/account/suspended').eq('true')),
+);
+```
+
+See the full [Fluent Policy Builder Reference](policy-builder.md) for all available operators (`field`, `and`, `or`, `not`, `exists`, `literalTrue`, `literalFalse`, `vibe`, comparison operators, and collection operators).
 
 ---
 
