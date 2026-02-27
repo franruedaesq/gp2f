@@ -25,19 +25,22 @@ The package ships pre-built binaries for the following platforms. If a pre-built
 ## Quick Start
 
 ```typescript
-import { evaluate, evaluateWithTrace, Workflow, GP2FServer } from '@gp2f/server';
+import { evaluate, evaluateWithTrace, Workflow, GP2FServer, p } from '@gp2f/server';
 
-// 1. Evaluate a policy
-const allowed = evaluate(
-  { kind: 'Field', path: '/role', value: 'admin' },
-  { role: 'admin' }
-); // => true
+// 1. Build a policy with the fluent builder
+const policy = p.and(
+  p.field('/role').eq('admin'),
+  p.exists('/session/token'),
+);
 
-// 2. Build a workflow and start a server
+// 2. Evaluate it
+const allowed = evaluate(policy, { role: 'admin', session: { token: 'abc' } }); // => true
+
+// 3. Build a workflow and start a server
 const wf = new Workflow('my-workflow');
 wf.addActivity(
   'approve',
-  { policy: { kind: 'Field', path: '/role', value: 'reviewer' } },
+  { policy: p.field('/role').eq('reviewer') },
   async (ctx) => { console.log('approved by', ctx.tenantId); }
 );
 
@@ -321,6 +324,39 @@ process.on('SIGTERM', () => server.stop());
 
 ---
 
+## Fluent Policy Builder
+
+The `@gp2f/server` package exports a **fluent policy builder** (`PolicyBuilder` / `p`) as a chainable alternative to writing raw JSON AST objects.
+
+```javascript
+const { p } = require('@gp2f/server');
+
+// Simple field check
+const policy = p.field('/role').eq('admin');
+
+// Logical AND of multiple conditions
+const policy = p.and(
+  p.field('/role').eq('clinician'),
+  p.exists('/patient_id'),
+  p.not(p.field('/patient/status').eq('discharged')),
+);
+
+// Role allow-list using `in`
+const policy = p.field('/role').in(['admin', 'editor', 'reviewer']);
+
+// Numeric threshold
+const policy = p.field('/score').gte(80);
+
+// Vibe Engine gate
+const policy = p.vibe('frustrated').withConfidence(0.8).build();
+```
+
+The builder output is a plain `AstNode` object and can be passed anywhere a policy AST is accepted—`evaluate()`, `evaluateWithTrace()`, `addActivity()`, or stored as JSON.
+
+See the full [Fluent Policy Builder Reference](policy-builder.md) for all operators and examples.
+
+---
+
 ## Running the Tests
 
 ```bash
@@ -348,6 +384,7 @@ The build produces a platform-specific `gp2f_node.<target>.node` file in the pac
 ## Related Documentation
 
 - [Policy AST Reference](../../README.md#policy-ast-reference)
+- [Fluent Policy Builder Reference](policy-builder.md)
 - [Rust Core API](rust-core-api.md)
 - [TypeScript Frontend Bindings](typescript-bindings.md)
 - [Architecture Overview](../architecture.md)

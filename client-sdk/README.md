@@ -87,7 +87,32 @@ export function EditorHeader() {
 }
 ```
 
-### 4. Lazy Policy Evaluation (WASM Engine)
+### 4. Fluent Policy Builder
+
+Construct policy ASTs with a chainable, type-safe API instead of writing raw JSON:
+
+```typescript
+import { p } from '@gp2f/client-sdk';
+
+// Role and session check
+const policy = p.and(
+  p.field('/user/role').eq('admin'),
+  p.exists('/session/token'),
+);
+
+// Role allow-list
+const policy = p.field('/role').in(['admin', 'editor', 'reviewer']);
+
+// Numeric threshold with vibe gate
+const policy = p.and(
+  p.field('/score').gte(80),
+  p.vibe('needs_help').withConfidence(0.7),
+);
+```
+
+The builder output is a plain `AstNode` that can be passed to `evaluate()`, stored as JSON, or sent to the server.
+
+### 5. Lazy Policy Evaluation (WASM Engine)
 Load the fast WASM policy engine dynamically when needed without blocking the main thread.
 
 ```typescript

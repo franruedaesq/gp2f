@@ -20,9 +20,10 @@ GP2F is a **deterministic, local-first framework** that decouples business rules
 7. [Server Usage](#server-usage)
 8. [TypeScript Client SDK](#typescript-client-sdk)
 9. [Node.js Native Bindings](#nodejs-native-bindings)
-10. [Policy AST Reference](#policy-ast-reference)
-11. [Deployment](#deployment)
-12. [Repository Structure](#repository-structure)
+10. [Fluent Policy Builder](#fluent-policy-builder)
+11. [Policy AST Reference](#policy-ast-reference)
+12. [Deployment](#deployment)
+13. [Repository Structure](#repository-structure)
 
 ---
 
@@ -430,6 +431,48 @@ const permitted = wf.dryRun({ role: 'reviewer' });
 ```
 
 See [`gp2f-node/index.d.ts`](gp2f-node/index.d.ts) for the full TypeScript API reference and [`docs/sdk-reference/nodejs-bindings.md`](docs/sdk-reference/nodejs-bindings.md) for detailed documentation.
+
+---
+
+## Fluent Policy Builder
+
+Both `@gp2f/client-sdk` and `@gp2f/server` ship a **fluent policy builder** (`PolicyBuilder` / `p`) that lets you construct policy ASTs with a chainable, type-safe API instead of writing raw JSON.
+
+```typescript
+import { p } from '@gp2f/client-sdk'; // or from '@gp2f/server'
+
+// Simple field equality
+const policy = p.field('/user/role').eq('admin');
+
+// Logical AND of multiple conditions
+const policy = p.and(
+  p.field('/user/role').eq('clinician'),
+  p.exists('/patient_id'),
+  p.not(p.field('/patient/status').eq('discharged')),
+);
+
+// Role allow-list
+const policy = p.field('/role').in(['admin', 'editor', 'reviewer']);
+
+// Numeric comparison
+const policy = p.field('/score').gte(80);
+
+// Combine logical operators at any depth
+const policy = p.and(
+  p.or(
+    p.field('/role').eq('admin'),
+    p.field('/role').eq('superuser'),
+  ),
+  p.exists('/session/token'),
+);
+
+// Semantic Vibe Engine gate
+const policy = p.vibe('frustrated').withConfidence(0.8).build();
+```
+
+The builder output is a plain `AstNode` that can be passed to `evaluate()`, `evaluateWithTrace()`, `addActivity()`, or serialized to JSON for storage.
+
+See [`docs/sdk-reference/policy-builder.md`](docs/sdk-reference/policy-builder.md) for the full API reference.
 
 ---
 
