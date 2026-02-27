@@ -48,3 +48,15 @@ try {
 }
 
 module.exports = { ...native, p, PolicyBuilder, FieldBuilder, VibeBuilder }
+
+// Explicitly assign named exports so Node.js CJS-ESM bridge can statically analyze them
+module.exports.GP2FServer = native.JsGp2FServer || native.GP2FServer
+module.exports.Workflow = native.JsWorkflow || native.Workflow
+module.exports.AstNode = native.JsAstNode || native.AstNode
+module.exports.NodeKind = native.JsNodeKind || native.NodeKind
+module.exports.evaluate = native.evaluate
+module.exports.evaluateWithTrace = native.evaluateWithTrace
+module.exports.p = p
+module.exports.PolicyBuilder = PolicyBuilder
+module.exports.FieldBuilder = FieldBuilder
+module.exports.VibeBuilder = VibeBuilder
