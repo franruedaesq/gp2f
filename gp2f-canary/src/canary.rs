@@ -80,7 +80,9 @@ impl FailureWindow {
     /// Failure rate over the last [`FAILURE_WINDOW`].  Returns `None` when
     /// there are no samples in the window.
     fn failure_rate(&mut self) -> Option<f64> {
-        let cutoff = Instant::now() - FAILURE_WINDOW;
+        let now = Instant::now();
+        // Use checked_sub to prevent underflow panic if uptime < window (e.g. tests on Windows CI).
+        let cutoff = now.checked_sub(FAILURE_WINDOW).unwrap_or(now);
         self.samples.retain(|s| s.ts >= cutoff);
         if self.samples.is_empty() {
             return None;

@@ -82,7 +82,9 @@ impl Hlc {
         #[cfg(not(test))]
         let wall_ms = Utc::now().timestamp_millis() as u64;
         #[cfg(test)]
-        let wall_ms = self.mock_wall_ms.unwrap_or_else(|| Utc::now().timestamp_millis() as u64);
+        let wall_ms = self
+            .mock_wall_ms
+            .unwrap_or_else(|| Utc::now().timestamp_millis() as u64);
 
         let mut last = self.last.lock().unwrap();
         let last_wall = hlc_wall_ms(*last);
@@ -105,7 +107,9 @@ impl Hlc {
         #[cfg(not(test))]
         let wall_ms = Utc::now().timestamp_millis() as u64;
         #[cfg(test)]
-        let wall_ms = self.mock_wall_ms.unwrap_or_else(|| Utc::now().timestamp_millis() as u64);
+        let wall_ms = self
+            .mock_wall_ms
+            .unwrap_or_else(|| Utc::now().timestamp_millis() as u64);
 
         let mut last = self.last.lock().unwrap();
         let last_wall = hlc_wall_ms(*last);
