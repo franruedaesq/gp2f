@@ -80,8 +80,20 @@ impl FailureWindow {
     /// Failure rate over the last [`FAILURE_WINDOW`].  Returns `None` when
     /// there are no samples in the window.
     fn failure_rate(&mut self) -> Option<f64> {
-        let cutoff = Instant::now() - FAILURE_WINDOW;
-        self.samples.retain(|s| s.ts >= cutoff);
+        // Use checked_sub to prevent panic if system uptime < FAILURE_WINDOW
+        let cutoff = Instant::now()
+            .checked_sub(FAILURE_WINDOW)
+            .unwrap_or_else(|| Instant::now()); // Fallback: effectively 0-length window if underflow (no samples retained)
+
+        // However, if we underflow, it means the process just started, so all samples
+        // are technically "within" the last 5 minutes of uptime.
+        // Better fallback: if checked_sub fails, we want to retain ALL samples (cutoff = very old).
+        // Since Instant is opaque, we can just skip retention if uptime < window.
+        if let Some(c) = Instant::now().checked_sub(FAILURE_WINDOW) {
+            self.samples.retain(|s| s.ts >= c);
+        }
+        // If checked_sub returns None, uptime < window, so all samples are valid.
+
         if self.samples.is_empty() {
             return None;
         }
