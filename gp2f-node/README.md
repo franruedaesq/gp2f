@@ -72,6 +72,34 @@ async function main() {
 main().catch(console.error);
 ```
 
+### 3. Fluent Policy Builder
+
+Build policy ASTs with a chainable API instead of raw JSON objects:
+
+```typescript
+import { p } from '@gp2f/server';
+
+// Field equality
+const policy = p.field('/role').eq('admin');
+
+// Logical AND
+const policy = p.and(
+  p.field('/role').eq('clinician'),
+  p.exists('/patient_id'),
+);
+
+// Role allow-list
+const policy = p.field('/role').in(['admin', 'editor', 'reviewer']);
+
+// Numeric comparison
+const policy = p.field('/score').gte(80);
+
+// Vibe Engine gate
+const policy = p.vibe('frustrated').withConfidence(0.8).build();
+```
+
+The builder output is a plain `AstNode` that works with `evaluate()`, `evaluateWithTrace()`, `addActivity()`, and anywhere else a policy AST is accepted.
+
 ## Development
 This package uses `napi-rs` to build the Rust bindings.
 
