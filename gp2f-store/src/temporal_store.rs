@@ -568,8 +568,8 @@ mod tests {
     #[tokio::test]
     async fn in_memory_store_total_count() {
         let store = InMemoryStore::new();
-        store.append(msg("op-1"), OpOutcome::Accepted).await;
-        store.append(msg("op-2"), OpOutcome::Rejected).await;
+        let _ = store.append(msg("op-1"), OpOutcome::Accepted).await;
+        let _ = store.append(msg("op-2"), OpOutcome::Rejected).await;
         assert_eq!(store.total_count().await, 2);
     }
 
